@@ -100,6 +100,9 @@ struct SubmitInfo {
 	}
 };
 
+// Prints the draws and dispatches the GPU last reached (KYTY_GPU_CHECKPOINTS=1, NVIDIA only).
+void DumpGpuCheckpoints(GraphicContext& graphics);
+
 class CommandBuffer {
 public:
 	~CommandBuffer() = default;

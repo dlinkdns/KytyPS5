@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <memory>
@@ -1147,6 +1148,14 @@ void WindowContext::CreateVulkan() {
 			device_extensions.push_back(VK_EXT_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_EXTENSION_NAME);
 		}
 		Vr::OpenXrAppendExtensions(device_extensions, available_extensions, true);
+		// GPU hang diagnostics: KYTY_GPU_CHECKPOINTS=1 marks every draw and dispatch.
+		if (std::getenv("KYTY_GPU_CHECKPOINTS") != nullptr &&
+		    HasExtension(available_extensions, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME)) {
+			device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+			graphic_ctx.nv_checkpoints_enabled = true;
+			LOGF("GPU checkpoints: enabled
+");
+		}
 	}
 
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, device_extensions);

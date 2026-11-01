@@ -36,6 +36,7 @@ struct GraphicContext {
 	bool                               provoking_vertex_last_enabled         = false;
 	bool                               maintenance8_enabled                  = false;
 	bool                               robust_buffer_access_enabled          = false;
+	bool                               nv_checkpoints_enabled                = false;
 	bool                               conditional_rendering_enabled         = false;
 	bool                               occlusion_queries_enabled             = false;
 	bool                               occlusion_query_precise_enabled       = false;
