@@ -1153,8 +1153,7 @@ void WindowContext::CreateVulkan() {
 		    HasExtension(available_extensions, VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME)) {
 			device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
 			graphic_ctx.nv_checkpoints_enabled = true;
-			LOGF("GPU checkpoints: enabled
-");
+			LOGF("GPU checkpoints: enabled\n");
 		}
 	}
 

@@ -45,8 +45,7 @@ void PrintCheckpointLine(const char* fmt_text, const char* where, const GpuCheck
 	char line[512];
 	std::snprintf(line, sizeof(line),
 	              "%s %s seq=%" PRIu64 " op=%u submit=%" PRIu64 " args=%u,%u,%u,%u,0x%" PRIx64
-	              " vs=0x%" PRIx64 " ps=0x%" PRIx64 " cs=0x%" PRIx64 "
-",
+	              " vs=0x%" PRIx64 " ps=0x%" PRIx64 " cs=0x%" PRIx64 "\n",
 	              fmt_text, where, r.seq, r.op, r.submit_id, r.args[0], r.args[1], r.args[2],
 	              r.args[3], r.arg4, r.vs_addr, r.ps_addr, r.cs_addr);
 	LOGF("%s", line);
@@ -60,13 +59,12 @@ void DumpGpuCheckpoints(GraphicContext& graphics) {
 	    VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueueCheckpointDataNV == nullptr) {
 		return;
 	}
-	VkQueue  queue = graphics.queue;
+	VkQueue  queue = static_cast<VkQueue>(graphics.queue);
 	uint32_t count = 0;
 	VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueueCheckpointDataNV(queue, &count, nullptr);
 	std::vector<VkCheckpointDataNV> data(count, VkCheckpointDataNV {VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV});
 	VULKAN_HPP_DEFAULT_DISPATCHER.vkGetQueueCheckpointDataNV(queue, &count, data.data());
-	std::printf("GPU checkpoints: %u reported, %" PRIu64 " recorded
-", count,
+	std::printf("GPU checkpoints: %u reported, %" PRIu64 " recorded\n", count,
 	            g_checkpoint_seq.load());
 	for (const auto& d: data) {
 		const auto  seq = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(d.pCheckpointMarker));
@@ -148,7 +146,7 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 			r.cs_addr = m_shaders->GetCs().cs_regs.data_addr;
 		}
 		VULKAN_HPP_DEFAULT_DISPATCHER.vkCmdSetCheckpointNV(
-		    m_buffer, reinterpret_cast<const void*>(static_cast<uintptr_t>(seq)));
+		    static_cast<VkCommandBuffer>(m_buffer), reinterpret_cast<const void*>(static_cast<uintptr_t>(seq)));
 	}
 }
 
