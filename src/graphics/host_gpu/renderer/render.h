@@ -102,6 +102,8 @@ struct SubmitInfo {
 
 // Prints the draws and dispatches the GPU last reached (KYTY_GPU_CHECKPOINTS=1, NVIDIA only).
 void DumpGpuCheckpoints(GraphicContext& graphics);
+// True when the comma-separated hex address list in env var `name` contains addr (debug aid).
+bool GpuDebugSkip(const char* name, uint64_t addr);
 
 class CommandBuffer {
 public:

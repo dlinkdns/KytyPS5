@@ -1336,6 +1336,9 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DrawIndex), submit_id,
 	                    args.index_count, 0, 1, args.instance_count,
 	                    reinterpret_cast<uint64_t>(args.index_addr));
+	if (GpuDebugSkip("KYTY_SKIP_PS", sh_ctx.GetPs().ps_regs.data_addr)) {
+		return true;
+	}
 
 	Common::LockGuard lock(m_context.GetMutex());
 	if (args.index_count == 0 || (args.instance_count == 0 && args.indirect.address == 0)) {
@@ -1443,6 +1446,9 @@ bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DrawIndexAuto), submit_id,
 	                    args.vertex_count, 0, args.first_vertex, args.instance_count,
 	                    args.first_instance);
+	if (GpuDebugSkip("KYTY_SKIP_PS", sh_ctx.GetPs().ps_regs.data_addr)) {
+		return true;
+	}
 
 	Common::LockGuard lock(m_context.GetMutex());
 	if (args.indirect.address == 0 && (args.vertex_count == 0 || args.instance_count == 0)) {

@@ -19,6 +19,7 @@
 #include <bit>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 namespace Libs::Graphics {
@@ -53,6 +54,29 @@ void PrintCheckpointLine(const char* fmt_text, const char* where, const GpuCheck
 }
 
 } // namespace
+
+bool GpuDebugSkip(const char* name, uint64_t addr) {
+	const char* list = std::getenv(name);
+	if (list == nullptr || addr == 0) {
+		return false;
+	}
+	for (const char* p = list; *p != '\0';) {
+		char*      end   = nullptr;
+		const auto value = std::strtoull(p, &end, 16);
+		if (end == p) {
+			break;
+		}
+		if (value == addr) {
+			static std::atomic<uint32_t> log_count {0};
+			if (log_count.fetch_add(1) < 8) {
+				std::printf("GPU debug: skipping %s 0x%" PRIx64 "\n", name, addr);
+			}
+			return true;
+		}
+		p = (*end == ',') ? end + 1 : end;
+	}
+	return false;
+}
 
 void DumpGpuCheckpoints(GraphicContext& graphics) {
 	if (!graphics.nv_checkpoints_enabled ||
