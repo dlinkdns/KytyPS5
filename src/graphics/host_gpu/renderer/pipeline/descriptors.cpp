@@ -200,6 +200,16 @@ static void ValidateSampledDepthBinding(const ShaderRecompiler::IR::ImageResourc
 	if (resource_ok && encoding_ok && view_ok) {
 		return;
 	}
+	// dlinkdns: let depth textures with unrecognised metadata through as uncompressed (Elden Ring PPSA04610).
+	if (resource_ok && view_ok) {
+		static bool warned = false;
+		if (!warned) {
+			warned = true;
+			LOGF("warning: sampled depth image with unsupported metadata (dword6=%08x) treated as uncompressed\n",
+			     static_cast<uint32_t>(descriptor.fields[6]));
+		}
+		return;
+	}
 	const auto descriptor_pitch =
 	    TileGetTexturePitch(descriptor.Format(), static_cast<uint32_t>(descriptor.Width5()) + 1u,
 	                        descriptor.TileMode());
