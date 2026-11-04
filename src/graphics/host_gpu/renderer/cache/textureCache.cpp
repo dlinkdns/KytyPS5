@@ -838,6 +838,10 @@ TextureCache::OverlapResult TextureCache::ResolveOverlap(const ImageInfo& reques
 			            ? result_id
 			            : ImageId {}};
 		}
+		// dlinkdns: the same image re-created larger at the same address (Elden Ring PPSA04610).
+		if (requested.tile_mode == cached.info.tile_mode && requested.data.size > cached.info.data.size) {
+			return {ExpandImage(requested, cached_id)};
+		}
 		EXIT("TextureCache: unresolvable equal-address image overlap, address=0x%016" PRIx64
 		     " requested=%ux%u "
 		     "cached=%ux%u requested_size=0x%016" PRIx64 " cached_size=0x%016" PRIx64
