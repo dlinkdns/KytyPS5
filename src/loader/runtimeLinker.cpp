@@ -668,6 +668,17 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
+			static const bool trace_faults = [] {
+				const char* v = std::getenv("KYTY_TRACE_FAULTS");
+				return v != nullptr && v[0] == '1';
+			}();
+			if (trace_faults) {
+				std::fprintf(stderr, "[fault] pc=%016" PRIx64 " rsp=%016" PRIx64 " rbp=%016" PRIx64
+				             " addr=%016" PRIx64 " acc=%u\n",
+				             info->exception_address, info->rsp, info->rbp,
+				             info->access_violation_vaddr,
+				             static_cast<unsigned>(info->access_violation_type));
+			}
 			return true;
 		}
 		if (const auto length =
@@ -707,6 +718,23 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			std::printf("stack:");
 			for (int i = 0; i < 32; i++) {
 				std::printf("%s %016" PRIx64, (i % 4 == 0) ? "\n " : "", stack[i]);
+			}
+			std::printf("\n");
+		}
+		// Leftovers below rsp: anything that looks like a code address (exception frames).
+		if (IsReadableRange(info->rsp - 0x800, 0x800)) {
+			const auto* below = reinterpret_cast<const uint64_t*>(info->rsp - 0x800);
+			std::printf("below-rsp code-like values:\n");
+			for (int i = 0; i < 0x100; i++) {
+				const auto v = below[i];
+				if (v >= 0x800000000ull && v < 0x1000000000ull) {
+					std::printf(" rsp-%03x: %016" PRIx64 "\n", 0x800 - i * 8, v);
+				}
+			}
+			const auto* zone = reinterpret_cast<const uint64_t*>(info->rsp - 0x80);
+			std::printf("red zone (rsp-0x80..rsp):");
+			for (int i = 0; i < 16; i++) {
+				std::printf("%s %016" PRIx64, (i % 4 == 0) ? "\n " : "", zone[i]);
 			}
 			std::printf("\n");
 		}
