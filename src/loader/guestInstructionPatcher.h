@@ -45,6 +45,8 @@ struct GuestInstructionPatchResult {
 	uint64_t               control_flow_memory_instruction_count    = 0;
 	uint64_t               unrelocatable_memory_instruction_count   = 0;
 	uint64_t               indirect_red_zone_function_count         = 0;
+	uint64_t               expanded_frame_function_count            = 0;
+	uint64_t               unexpanded_frame_function_count          = 0;
 	InstructionPatchCounts reciprocal_sqrt;
 	InstructionPatchCounts extrq;
 	InstructionPatchCounts insertq;

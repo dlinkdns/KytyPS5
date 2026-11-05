@@ -1895,6 +1895,13 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 				     result.stack_dependent_memory_instruction_count,
 				     result.control_flow_memory_instruction_count,
 				     result.unrelocatable_memory_instruction_count);
+				std::printf("Windows guest red-zone patching: %s, expanded frames=%" PRIu64
+				            ", unexpanded frames=%" PRIu64 ", red_zone=%" PRIu64
+				            ", unrelocatable=%" PRIu64 "\n",
+				            module_name.c_str(), result.expanded_frame_function_count,
+				            result.unexpanded_frame_function_count,
+				            result.red_zone_function_count,
+				            result.unrelocatable_memory_instruction_count);
 			}
 		}
 		if (totals.rdtsc.found != 0) {

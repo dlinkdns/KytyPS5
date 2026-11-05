@@ -3,6 +3,7 @@
 
 #include "loader/guestInstructionPatcher.h"
 
+#include "common/alignment.h"
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/virtualMemory.h"
@@ -111,12 +112,24 @@ struct DecodedCodeInstruction {
 	std::optional<s64>                                       stack_pointer_delta;
 };
 
+// A frame-pointer leaf function whose RBP-relative locals reach below RSP can instead get a
+// larger frame: the prologue's SUB RSP grows to cover the deepest local, and every epilogue
+// ADD RSP becomes LEA RSP, [RBP - saved_size], which is right for any frame size.
+struct FrameExpansion {
+	uintptr_t              sub_address {};
+	size_t                 sub_length {};
+	s32                    new_size {};
+	s32                    saved_size {};
+	std::vector<uintptr_t> epilogues;
+};
+
 struct DecodedFunction {
 	std::map<uintptr_t, DecodedCodeInstruction> instructions;
 	std::set<uintptr_t>                         branch_targets;
 	bool                                        uses_red_zone {};
 	bool                                        has_indirect_branch {};
 	bool                                        requires_conservative_red_zone_tracking {};
+	std::optional<FrameExpansion>               frame_expansion;
 };
 
 enum class InstructionReplacement {
@@ -133,6 +146,8 @@ struct InstructionRewrite {
 	bool                   protect_red_zone {};
 	bool                   protected_indirect_call {};
 	InstructionReplacement replacement {};
+	// Emit SUB RSP, imm32 with this size instead of the original (short) SUB RSP, imm8.
+	std::optional<s32>     sub_rsp_override;
 };
 
 InstructionPatchCounts& ReplacementCounts(GuestInstructionPatchResult& result,
@@ -538,14 +553,26 @@ void DetectFramePointerRedZone(DecodedFunction& function, uintptr_t function_sta
 
 	// Distance from RSP up to RBP once the prologue's pushes and SUB RSP are done. Stopping at
 	// the first other instruction can only underestimate it, which over-protects.
-	s64 frame_size = 0;
+	s64                           frame_size = 0;
+	s64                           saved_size = 0;
+	const DecodedCodeInstruction* sub_rsp    = nullptr;
+	bool                          plain_prologue = true;
 	for (const auto* decoded = at(address);
 	     decoded != nullptr && decoded->changes_stack_pointer &&
 	     decoded->stack_pointer_delta.has_value() && *decoded->stack_pointer_delta < 0;
 	     decoded = at(address)) {
 		frame_size -= *decoded->stack_pointer_delta;
+		if (decoded->instruction.mnemonic == ZYDIS_MNEMONIC_PUSH && sub_rsp == nullptr &&
+		    decoded->operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+			saved_size -= *decoded->stack_pointer_delta;
+		} else if (decoded->instruction.mnemonic == ZYDIS_MNEMONIC_SUB && sub_rsp == nullptr) {
+			sub_rsp = decoded;
+		} else {
+			plain_prologue = false;
+		}
 		address += decoded->instruction.length;
 	}
+	const uintptr_t prologue_end = address;
 	if (const auto* next = at(address); next == nullptr || next->changes_stack_pointer) {
 		// An aligning AND RSP or similar leaves the frame size unknown.
 		return;
@@ -557,17 +584,134 @@ void DetectFramePointerRedZone(DecodedFunction& function, uintptr_t function_sta
 		return;
 	}
 
+	s64 deepest = 0;
 	for (const auto& [_, decoded]: function.instructions) {
 		for (u8 index = 0; index < decoded.instruction.operand_count_visible; ++index) {
 			const auto& operand = decoded.operands[index];
 			if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY &&
 			    IsFramePointerRegister(operand.mem.base) && operand.mem.disp.value < -frame_size) {
-				function.uses_red_zone                           = true;
-				function.requires_conservative_red_zone_tracking = true;
-				return;
+				deepest = std::max<s64>(deepest, -operand.mem.disp.value);
 			}
 		}
 	}
+	if (deepest == 0) {
+		return;
+	}
+	function.uses_red_zone                           = true;
+	function.requires_conservative_red_zone_tracking = true;
+
+	// Prefer growing the frame over wrapping every memory access: wrapping cannot reach
+	// instructions it fails to relocate, and one fault there still clobbers the locals.
+	if (!plain_prologue || sub_rsp == nullptr || function.has_indirect_branch ||
+	    saved_size > 0x80) {
+		return;
+	}
+	const auto* sub_bytes = reinterpret_cast<const u8*>(sub_rsp->address);
+	const bool  sub_imm32 = sub_rsp->instruction.length == 7 && sub_bytes[0] == 0x48 &&
+	                       sub_bytes[1] == 0x81 && sub_bytes[2] == 0xec;
+	const bool  sub_imm8  = sub_rsp->instruction.length == 4 && sub_bytes[0] == 0x48 &&
+	                      sub_bytes[1] == 0x83 && sub_bytes[2] == 0xec;
+	if (!sub_imm32 && !sub_imm8) {
+		return;
+	}
+	const s64 old_size = frame_size - saved_size;
+	const s64 new_size = old_size + static_cast<s64>(Common::AlignUp<u64>(static_cast<u64>(deepest - frame_size), 16));
+	if (new_size > 0x7fff0000) {
+		return;
+	}
+
+	FrameExpansion expansion {.sub_address = sub_rsp->address,
+	                          .sub_length  = sub_rsp->instruction.length,
+	                          .new_size    = static_cast<s32>(new_size),
+	                          .saved_size  = static_cast<s32>(saved_size)};
+	for (const auto& [instruction_address, decoded]: function.instructions) {
+		if (instruction_address >= function_start && instruction_address < prologue_end) {
+			continue;
+		}
+		const auto& ops      = decoded.operands;
+		const auto  mnemonic = decoded.instruction.mnemonic;
+		// The epilogue LEA relies on RBP still being the frame base.
+		for (u8 index = 0; index < decoded.instruction.operand_count; ++index) {
+			if (ops[index].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+			    IsFramePointerRegister(ops[index].reg.value) &&
+			    (ops[index].actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0 &&
+			    mnemonic != ZYDIS_MNEMONIC_POP) {
+				return;
+			}
+		}
+		if (!decoded.uses_stack_pointer) {
+			continue;
+		}
+		if ((mnemonic == ZYDIS_MNEMONIC_PUSH || mnemonic == ZYDIS_MNEMONIC_POP) &&
+		    ops[0].type == ZYDIS_OPERAND_TYPE_REGISTER) {
+			continue;
+		}
+		if (decoded.instruction.meta.category == ZYDIS_CATEGORY_RET) {
+			continue;
+		}
+		if (mnemonic == ZYDIS_MNEMONIC_ADD && decoded.stack_pointer_delta == old_size) {
+			const auto* bytes = reinterpret_cast<const u8*>(instruction_address);
+			const bool  imm32 = decoded.instruction.length == 7 && bytes[0] == 0x48 &&
+			                   bytes[1] == 0x81 && bytes[2] == 0xc4;
+			const bool  imm8  = decoded.instruction.length == 4 && bytes[0] == 0x48 &&
+			                  bytes[1] == 0x83 && bytes[2] == 0xc4;
+			if (!imm32 && !imm8) {
+				return;
+			}
+			expansion.epilogues.push_back(instruction_address);
+			continue;
+		}
+		// Anything else that reads or moves RSP depends on the frame size.
+		return;
+	}
+	if (expansion.epilogues.empty()) {
+		return;
+	}
+	function.uses_red_zone                           = false;
+	function.requires_conservative_red_zone_tracking = false;
+	function.frame_expansion                         = std::move(expansion);
+}
+
+// Write a frame expansion found by DetectFramePointerRedZone. Same-length rewrites happen in
+// place and are re-decoded so neighbouring relocations copy the new bytes; a short SUB RSP,
+// imm8 that cannot hold the new size is relocated through a trampoline instead.
+void ApplyFrameExpansion(PatchModule* module, DecodedFunction& function,
+                         std::map<uintptr_t, InstructionRewrite>& rewrite_sites,
+                         GuestInstructionPatchResult&             result) {
+	const auto& expansion = *function.frame_expansion;
+	auto&       patch_gen = module->patch_gen;
+	const auto  write     = [&](uintptr_t address, std::initializer_list<u8> head, s32 value,
+                           size_t value_size) {
+		patch_gen.reset();
+		patch_gen.setSize(address - reinterpret_cast<uintptr_t>(patch_gen.getCode()));
+		for (const u8 byte: head) {
+			patch_gen.db(byte);
+		}
+		const auto raw = static_cast<u32>(value);
+		for (size_t i = 0; i < value_size; ++i) {
+			patch_gen.db(static_cast<u8>(raw >> (8 * i)));
+		}
+		EXIT_IF(Xbyak::GetError() != 0);
+		auto& decoded = function.instructions.at(address);
+		decoded       = DecodeCodeInstruction(address, address + decoded.instruction.length);
+	};
+
+	for (const uintptr_t epilogue: expansion.epilogues) {
+		// LEA RSP, [RBP - saved_size] with the same length as the ADD it replaces.
+		if (function.instructions.at(epilogue).instruction.length == 4) {
+			write(epilogue, {0x48, 0x8d, 0x65}, -expansion.saved_size, 1);
+		} else {
+			write(epilogue, {0x48, 0x8d, 0xa5}, -expansion.saved_size, 4);
+		}
+	}
+	if (expansion.sub_length == 7) {
+		write(expansion.sub_address, {0x48, 0x81, 0xec}, expansion.new_size, 4);
+	} else if (expansion.new_size <= 0x7f) {
+		write(expansion.sub_address, {0x48, 0x83, 0xec}, expansion.new_size, 1);
+	} else {
+		rewrite_sites[expansion.sub_address].sub_rsp_override = expansion.new_size;
+	}
+	++result.expanded_frame_function_count;
 }
 
 DecodedFunction DecodeFunction(uintptr_t function_start, uintptr_t function_end,
@@ -1170,6 +1314,9 @@ void RelocateGuestInstructions(PatchModule* module, const DecodedFunction& funct
 					}
 				} else if (protected_indirect_call) {
 					encoded = GenerateProtectedIndirectCall(*decoded, generator);
+				} else if (rewrite != rewrite_sites.end() &&
+				           rewrite->second.sub_rsp_override.has_value()) {
+					generator.sub(rsp, static_cast<u32>(*rewrite->second.sub_rsp_override));
 				} else {
 					encoded = EncodeRelocatedInstruction(*decoded, generator);
 				}
@@ -1656,6 +1803,9 @@ GuestInstructionPatchResult PatchGuestInstructions(u64 segment_addr, u64 segment
 			++result.red_zone_function_count;
 			result.indirect_red_zone_function_count += function.has_indirect_branch;
 		}
+		if (protect_memory && function.frame_expansion.has_value()) {
+			ApplyFrameExpansion(module, function, rewrite_sites, result);
+		}
 		if (protect_memory) {
 			CollectRedZoneMemoryInstructions(function, rewrite_sites, result);
 		}
@@ -1668,6 +1818,16 @@ GuestInstructionPatchResult PatchGuestInstructions(u64 segment_addr, u64 segment
 		if (!rewrite_sites.empty()) {
 			RelocateGuestInstructions(module, function, rewrite_sites, result, tsc_multiplier);
 			TrapUnrelocatedInstructions(*module, function, rewrite_sites, result);
+		}
+		if (function.frame_expansion.has_value()) {
+			const auto sub = function.frame_expansion->sub_address;
+			if (const auto site = rewrite_sites.find(sub);
+			    site != rewrite_sites.end() && site->second.sub_rsp_override.has_value() &&
+			    !module->patched.contains(reinterpret_cast<u8*>(sub))) {
+				// The epilogues are still correct; only the protection is missing.
+				--result.expanded_frame_function_count;
+				++result.unexpanded_frame_function_count;
+			}
 		}
 	}
 	const auto trampoline_addr =
