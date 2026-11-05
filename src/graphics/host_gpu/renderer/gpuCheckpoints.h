@@ -57,6 +57,29 @@ inline void Mark(vk::CommandBuffer buffer, uint32_t kind, uint64_t hash, uint64_
 	buffer.setCheckpointNV(reinterpret_cast<const void*>(static_cast<uintptr_t>(id)));
 }
 
+// KYTY_SKIP_SHADER=<hex hash>[,<hex hash>...] drops dispatches and draws of those shaders.
+inline bool SkipShader(uint64_t hash) {
+	static const auto hashes = [] {
+		std::array<uint64_t, 16> list {};
+		const char*              text = std::getenv("KYTY_SKIP_SHADER");
+		for (size_t i = 0; text != nullptr && *text != '\0' && i < list.size(); ++i) {
+			char* end = nullptr;
+			list[i]   = std::strtoull(text, &end, 16);
+			text      = (end != nullptr && *end == ',') ? end + 1 : nullptr;
+		}
+		return list;
+	}();
+	if (hash == 0) {
+		return false;
+	}
+	for (const auto skipped: hashes) {
+		if (skipped == hash) {
+			return true;
+		}
+	}
+	return false;
+}
+
 inline void Report(vk::Queue queue) {
 	if (!Enabled().load(std::memory_order_relaxed)) {
 		return;
@@ -67,8 +90,13 @@ inline void Report(vk::Queue queue) {
 	for (const auto& checkpoint: data) {
 		const auto id    = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(checkpoint.pCheckpointMarker));
 		const auto entry = Ring()[id % RingSize];
-		const char* kind = entry.kind == 1 ? "dispatch" : entry.kind == 2 ? "dispatch-indirect"
-		                 : entry.kind == 3 ? "draw" : "?";
+		const char* kind = entry.kind == 1   ? "dispatch"
+		                   : entry.kind == 2 ? "dispatch-indirect"
+		                   : entry.kind == 3 ? "draw"
+		                   : entry.kind == 6 ? "after-dispatch"
+		                   : entry.kind == 7 ? "after-dispatch-indirect"
+		                   : entry.kind == 8 ? "after-draw"
+		                                     : "?";
 		std::printf("checkpoint id=%" PRIu64 " stage=%s %s hash=0x%016" PRIx64
 		            " hash2=0x%016" PRIx64 " groups=%ux%ux%u\n",
 		            id, vk::to_string(checkpoint.stage).c_str(), kind, entry.hash, entry.hash2,

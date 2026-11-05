@@ -1215,6 +1215,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		                       emit.indirect.count, emit.indirect.stride);
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
+	GpuCheckpoints::Mark(vk_buffer, 8, state.vertex_info[0].stage.module->info.shader_hash,
+	                     state.ps_active ? state.ps_input_info.stage.module->info.shader_hash : 0);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
 

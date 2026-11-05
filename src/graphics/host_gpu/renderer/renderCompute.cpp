@@ -451,7 +451,10 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
 	                                   std::max(input_info.threads_num[1], 1u) *
 	                                   std::max(input_info.threads_num[2], 1u);
-	if ((mode & DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE) != 0 && program.info.uses_gds &&
+	if (GpuCheckpoints::SkipShader(program.shader_hash)) {
+		std::printf("skipping dispatch of shader 0x%016" PRIx64 " groups=%ux%ux%u\n",
+		            program.shader_hash, thread_group_x, thread_group_y, thread_group_z);
+	} else if ((mode & DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE) != 0 && program.info.uses_gds &&
 	    group_threads <= input_info.wave_size && !input_info.lds_storage) {
 		// A single guest wave per group can run in launch order without a device-wide
 		// spinlock. Keep the guest workgroup IDs when splitting the dispatch.
@@ -468,6 +471,8 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	} else {
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
+	GpuCheckpoints::Mark(vk_buffer, 6, program.shader_hash, sh_ctx.GetCs().cs_regs.data_addr,
+	                     thread_group_x, thread_group_y, thread_group_z);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
@@ -533,7 +538,10 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	GpuCheckpoints::Mark(vk_buffer, 2, program.shader_hash, args_addr);
-	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	if (!GpuCheckpoints::SkipShader(program.shader_hash)) {
+		vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	}
+	GpuCheckpoints::Mark(vk_buffer, 7, program.shader_hash, args_addr);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
