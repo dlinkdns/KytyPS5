@@ -49,7 +49,7 @@ inline std::atomic_uint64_t& Next() {
 
 inline void Mark(vk::CommandBuffer buffer, uint32_t kind, uint64_t hash, uint64_t hash2 = 0,
                  uint32_t x = 0, uint32_t y = 0, uint32_t z = 0) {
-	if (!Enabled().load(std::memory_order_relaxed)) {
+	if (!Enabled().load(std::memory_order_relaxed) || !buffer) {
 		return;
 	}
 	const uint64_t id = Next().fetch_add(1, std::memory_order_relaxed);
@@ -96,6 +96,9 @@ inline void Report(vk::Queue queue) {
 		                   : entry.kind == 6 ? "after-dispatch"
 		                   : entry.kind == 7 ? "after-dispatch-indirect"
 		                   : entry.kind == 8 ? "after-draw"
+		                   : entry.kind == 10 ? "draw-begin(count,inst)"
+		                   : entry.kind == 11 ? "draw-metadata-op(count,inst)"
+		                   : entry.kind == 12 ? "draw-prepared"
 		                                     : "?";
 		std::printf("checkpoint id=%" PRIu64 " stage=%s %s hash=0x%016" PRIx64
 		            " hash2=0x%016" PRIx64 " groups=%ux%ux%u\n",

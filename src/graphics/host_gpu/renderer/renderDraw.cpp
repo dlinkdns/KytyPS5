@@ -1272,9 +1272,11 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	if (args.index_count == 0 || (args.instance_count == 0 && args.indirect.address == 0)) {
 		return true;
 	}
+	GpuCheckpoints::Mark(buffer.Handle(), 10, args.index_count, args.instance_count);
 
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer)) {
+		GpuCheckpoints::Mark(buffer.Handle(), 11, args.index_count, args.instance_count);
 		ResetBindings();
 		return true;
 	}
@@ -1339,6 +1341,8 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 		ResetBindings();
 		return true;
 	}
+	GpuCheckpoints::Mark(buffer.Handle(), 12, state.vertex_info[0].stage.module->info.shader_hash,
+	                     state.ps_active ? state.ps_input_info.stage.module->info.shader_hash : 0);
 
 	LogDrawStateIfNeeded(buffer, draw, state, args.index_type_and_size,
 	                     args.index_addr);
