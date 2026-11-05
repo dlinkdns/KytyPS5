@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "kernel/memory.h"
 
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -990,6 +991,21 @@ void TextureCache::InitializeImage(ImageId id) {
 	}
 	const bool upload = image.IsBufferModified() || image.IsCpuDirty();
 	if (upload) {
+		static const bool log_uploads = [] {
+			const char* value = std::getenv("KYTY_LOG_UPLOADS");
+			return value != nullptr && value[0] == '1';
+		}();
+		if (log_uploads) {
+			std::fprintf(stderr,
+			             "[upload] addr=%016llx size=%llx %ux%ux%u fmt=%u tile=%u buffer=%d cpu=%d "
+			             "stencil=%d\n",
+			             static_cast<unsigned long long>(image.info.data.address),
+			             static_cast<unsigned long long>(image.info.data.size), image.info.extent.width,
+			             image.info.extent.height, image.info.resources.layers,
+			             static_cast<uint32_t>(image.info.pixel_format),
+			             static_cast<uint32_t>(image.info.tile_mode), image.IsBufferModified() ? 1 : 0,
+			             image.IsCpuDirty() ? 1 : 0, image.depth_id ? 1 : 0);
+		}
 		const auto [source, source_offset] =
 		    m_buffer_cache.ObtainBufferForImage(image.info.data.address, image.info.data.size);
 		if (source == nullptr) {
