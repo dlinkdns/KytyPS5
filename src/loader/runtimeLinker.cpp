@@ -650,6 +650,31 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
+	// A fault raised while this thread is already inside the handler would recurse until the
+	// guest stack is gone and the process dies without a report; say so while there is room.
+	static thread_local int      handler_depth = 0;
+	static thread_local uint64_t outer_pc      = 0;
+	static thread_local uint64_t outer_addr    = 0;
+	struct DepthGuard {
+		int& depth;
+		~DepthGuard() { --depth; }
+	} depth_guard {++handler_depth};
+	if (handler_depth > 1) {
+		std::fprintf(stderr,
+		             "[nested-fault] depth=%d pc=%016" PRIx64 " addr=%016" PRIx64 " rsp=%016" PRIx64
+		             " outer_pc=%016" PRIx64 " outer_addr=%016" PRIx64 "\n",
+		             handler_depth, info->exception_address, info->access_violation_vaddr, info->rsp,
+		             outer_pc, outer_addr);
+		std::fflush(stderr);
+		if (handler_depth > 4) {
+			EXIT("nested host exceptions: pc=0x%016" PRIx64 " outer_pc=0x%016" PRIx64 "\n",
+			     info->exception_address, outer_pc);
+		}
+	} else {
+		outer_pc   = info->exception_address;
+		outer_addr = info->access_violation_vaddr;
+	}
+
 	if (info->type == Common::HostException::ExceptionType::IllegalInstruction &&
 	    Loader::X64InstructionEmulator::TryEmulate(info->native_context)) {
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::EmulatedInstructions);
