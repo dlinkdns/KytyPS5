@@ -344,6 +344,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 
 	m_command.m_buffer = nullptr;
+	GpuCheckpoints::Profile::Flush(graphics.queue);
 	return tick;
 }
 

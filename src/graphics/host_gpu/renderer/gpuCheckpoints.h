@@ -6,12 +6,17 @@
 
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace Libs::Graphics::GpuCheckpoints {
 
@@ -47,8 +52,140 @@ inline std::atomic_uint64_t& Next() {
 	return next;
 }
 
+// KYTY_GPU_PROFILE=1: timestamps around dispatches, draws and tiler jobs; every ~2 s the GPU is
+// drained and the most expensive shaders of that window are printed.
+namespace Profile {
+struct Pending {
+	uint64_t hash;
+	uint32_t kind;
+	uint32_t query;
+	bool     ended;
+};
+struct Total {
+	double   ms;
+	uint64_t count;
+};
+struct State {
+	vk::Device                             device;
+	vk::QueryPool                          pool;
+	double                                 period_ns = 1.0;
+	uint32_t                               next      = 0;
+	std::vector<Pending>                   pending;
+	std::vector<size_t>                    open;
+	std::unordered_map<uint64_t, Total>    totals;
+	std::chrono::steady_clock::time_point  last = std::chrono::steady_clock::now();
+};
+inline constexpr uint32_t Capacity = 1u << 17u;
+
+inline bool Requested() {
+	static const bool requested = [] {
+		const char* value = std::getenv("KYTY_GPU_PROFILE");
+		return value != nullptr && value[0] == '1';
+	}();
+	return requested;
+}
+
+inline State& Get() {
+	static State state;
+	return state;
+}
+
+inline void Init(vk::Device device, float timestamp_period) {
+	if (!Requested()) {
+		return;
+	}
+	auto& s     = Get();
+	s.device    = device;
+	s.period_ns = timestamp_period;
+	vk::QueryPoolCreateInfo info {};
+	info.queryType  = vk::QueryType::eTimestamp;
+	info.queryCount = Capacity;
+	s.pool          = device.createQueryPool(info);
+	device.resetQueryPool(s.pool, 0, Capacity);
+	std::printf("GPU profiler enabled (timestamp period %.2f ns)\n", timestamp_period);
+}
+
+inline bool IsBegin(uint32_t kind) { return kind == 1 || kind == 2 || kind == 3 || kind == 15; }
+inline bool IsEnd(uint32_t kind) { return kind == 6 || kind == 7 || kind == 8 || kind == 16; }
+
+inline void Record(vk::CommandBuffer buffer, uint32_t kind, uint64_t hash) {
+	auto& s = Get();
+	if (!s.pool || !buffer) {
+		return;
+	}
+	if (IsBegin(kind)) {
+		if (s.next + 2 > Capacity) {
+			return;
+		}
+		buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.pool, s.next);
+		s.open.push_back(s.pending.size());
+		s.pending.push_back({kind == 15 ? (0x7111e000000000ull | hash) : hash, kind, s.next, false});
+		s.next += 2;
+	} else if (IsEnd(kind) && !s.open.empty()) {
+		auto& entry = s.pending[s.open.back()];
+		s.open.pop_back();
+		buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.pool, entry.query + 1);
+		entry.ended = true;
+	}
+}
+
+// Call right after a queue submit: everything recorded so far has been submitted.
+inline void Flush(vk::Queue queue) {
+	auto& s = Get();
+	if (!s.pool) {
+		return;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (now - s.last < std::chrono::seconds(2) && s.next + 4096 < Capacity) {
+		return;
+	}
+	queue.waitIdle();
+	std::vector<uint64_t> stamps(s.next);
+	if (s.next != 0) {
+		(void)s.device.getQueryPoolResults(s.pool, 0, s.next, stamps.size() * sizeof(uint64_t),
+		                                   stamps.data(), sizeof(uint64_t),
+		                                   vk::QueryResultFlagBits::e64);
+	}
+	double window_ms = 0.0;
+	for (const auto& entry: s.pending) {
+		if (!entry.ended || stamps[entry.query + 1] < stamps[entry.query]) {
+			continue;
+		}
+		const double ms = static_cast<double>(stamps[entry.query + 1] - stamps[entry.query]) *
+		                  s.period_ns / 1e6;
+		auto& total = s.totals[(uint64_t {entry.kind == 3 ? 1u : 0u} << 63u) ^ entry.hash];
+		total.ms += ms;
+		total.count++;
+		window_ms += ms;
+	}
+	const double seconds = std::chrono::duration<double>(now - s.last).count();
+	std::vector<std::pair<uint64_t, Total>> top(s.totals.begin(), s.totals.end());
+	std::sort(top.begin(), top.end(),
+	          [](const auto& a, const auto& b) { return a.second.ms > b.second.ms; });
+	std::printf("--- GPU profile: %.1f s window, %.1f ms GPU per second in %zu jobs ---\n", seconds,
+	            window_ms / seconds, s.pending.size());
+	for (size_t i = 0; i < top.size() && i < 20; ++i) {
+		const auto key = top[i].first;
+		std::printf("  %7.2f ms/s  %6llu calls  %s 0x%016llx\n", top[i].second.ms / seconds,
+		            static_cast<unsigned long long>(top[i].second.count),
+		            (key >> 63u) ? "draw(vs)" : ((key >> 40u) == 0x7111e0u ? "tiler" : "dispatch"),
+		            static_cast<unsigned long long>(key & 0x7fffffffffffffffull));
+	}
+	std::fflush(stdout);
+	s.device.resetQueryPool(s.pool, 0, Capacity);
+	s.pending.clear();
+	s.open.clear();
+	s.totals.clear();
+	s.next = 0;
+	s.last = std::chrono::steady_clock::now();
+}
+} // namespace Profile
+
 inline void Mark(vk::CommandBuffer buffer, uint32_t kind, uint64_t hash, uint64_t hash2 = 0,
                  uint32_t x = 0, uint32_t y = 0, uint32_t z = 0) {
+	if (Profile::Requested()) {
+		Profile::Record(buffer, kind, hash);
+	}
 	if (!Enabled().load(std::memory_order_relaxed) || !buffer) {
 		return;
 	}
