@@ -34132,16 +34132,16 @@ std::vector<TestCase> ScalarMemRealtimeCases() {
   } variants[] = {
       {"ScalarMemRealtimeDividesNanosecondClockBy10",
        {.maintenance8 = true, .device_clock_period_ps = 1000},
-       {"OpUMulExtended", "%ulong_1844674407370955162\n"},
+       {"OpUDiv %ulong", "%ulong_10\n"},
        {}},
       {"ScalarMemRealtimeKeeps100MHzClock",
        {.maintenance8 = true, .device_clock_period_ps = 10000},
        {"OpReadClockKHR %ulong %uint_1"},
-       {"OpUMulExtended"}},
+       {"OpUDiv %ulong"}},
       {"ScalarMemRealtimeKeeps19MHzClock",
        {.maintenance8 = true, .device_clock_period_ps = 52083},
        {"OpReadClockKHR %ulong %uint_1"},
-       {"OpUMulExtended"}}};
+       {"OpUDiv %ulong"}}};
   std::vector<TestCase> tests;
   for (const auto &variant : variants) {
     TestCase test{variant.name, code, {}, {64},

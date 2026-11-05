@@ -954,17 +954,14 @@ uint32_t EmitReadRealtimeClock(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto clock =
 	    Unary(state, spv::OpReadClockKHR, TypeU64(state), ConstantU32(state, spv::ScopeDevice));
 	// S_MEMREALTIME counts at 100 MHz. Divide the host clock by its rate over 100 MHz, rounded:
-	// 1 GHz by 10; under 150 MHz stays. The high word of clock * ceil(2^64 / divisor) is the
-	// quotient or one above it, without a 64-bit division.
+	// 1 GHz by 10; under 150 MHz stays. A plain division by a constant lets the driver pick the
+	// multiply sequence; the 64-bit OpUMulExtended form hung Tekken 8's clock-polling compute
+	// shaders on NVIDIA (RTX 3080 Ti, TDR within seconds of boot).
 	const uint32_t divisor = (10000u + period / 2u) / period;
 	if (divisor <= 1u) {
 		return clock;
 	}
-	const auto u64     = TypeU64(state);
-	const auto pair    = state.builder.Type(spv::OpTypeStruct, u64, u64);
-	const auto magic   = ConstantU64(state, ~uint64_t {0} / divisor + 1u);
-	const auto product = Binary(state, spv::OpUMulExtended, pair, clock, magic);
-	return EmitNative<spv::OpCompositeExtract, IR::Type::U64>(state, product, 1u);
+	return Binary(state, spv::OpUDiv, TypeU64(state), clock, ConstantU64(state, divisor));
 }
 
 void EmitUnreachable(ValueEmitContext& ctx, const IR::Inst& inst) {
