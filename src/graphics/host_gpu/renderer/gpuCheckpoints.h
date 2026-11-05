@@ -105,6 +105,9 @@ inline void Report(vk::Queue queue) {
 		                   : entry.kind == 16 ? "after-tiler-dispatch"
 		                   : entry.kind == 17 ? "image-upload(addr,size; w,h,format)"
 		                   : entry.kind == 18 ? "after-image-upload"
+		                   : entry.kind == 19 ? "pre-copy-buffer-to-image(aspect, rowlen<<32|imgheight; w,h,copies)"
+		                   : entry.kind == 20 ? "after-copy-buffer-to-image(format)"
+		                   : entry.kind == 21 ? "after-upload-transit(format)"
 		                                     : "?";
 		std::printf("checkpoint id=%" PRIu64 " stage=%s %s hash=0x%016" PRIx64
 		            " hash2=0x%016" PRIx64 " groups=%ux%ux%u\n",

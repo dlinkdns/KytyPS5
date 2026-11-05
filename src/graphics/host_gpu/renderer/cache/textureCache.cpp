@@ -929,6 +929,15 @@ void TextureCache::UploadImage(Image& image, Buffer& source, uint64_t source_off
 	    Prospero::NumBytesPerElement(info.guest_format) != info.bytes_per_block) {
 		EXIT("TextureCache: invalid depth upload\n");
 	}
+	if (image.depth_id) {
+		static const bool skip_stencil = [] {
+			const char* value = std::getenv("KYTY_SKIP_STENCIL_UPLOAD");
+			return value != nullptr && value[0] == '1';
+		}();
+		if (skip_stencil) {
+			return;
+		}
+	}
 	const auto layers          = info.resources.layers;
 	const auto full_slice_size = info.linear_slice_stride;
 	auto       linear          = m_tiler.Detile(source.Handle(), source_offset, info);

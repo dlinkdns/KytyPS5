@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/gpuCheckpoints.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -272,8 +273,13 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	dependency.pImageMemoryBarriers     = image_barriers.data();
 	auto command                        = m_scheduler.Current().Handle();
 	command.pipelineBarrier2(dependency);
+	GpuCheckpoints::Mark(command, 19, static_cast<uint32_t>(copies[0].imageSubresource.aspectMask),
+	                     (uint64_t {copies[0].bufferRowLength} << 32u) | copies[0].bufferImageHeight,
+	                     copies[0].imageExtent.width, copies[0].imageExtent.height,
+	                     static_cast<uint32_t>(copies.size()));
 	command.copyBufferToImage(buffer, backing.image, vk::ImageLayout::eTransferDstOptimal,
 	                          static_cast<uint32_t>(copies.size()), copies.data());
+	GpuCheckpoints::Mark(command, 20, static_cast<uint32_t>(backing.format));
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
 	buffer_barrier.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
 	buffer_barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
@@ -284,6 +290,7 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	command.pipelineBarrier2(dependency);
 	Transit(vk::ImageLayout::eGeneral,
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
+	GpuCheckpoints::Mark(command, 21, static_cast<uint32_t>(backing.format));
 }
 
 void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer,
