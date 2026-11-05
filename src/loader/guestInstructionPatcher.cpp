@@ -503,6 +503,73 @@ ResolveBoundedJumpTable(const DecodedFunction& function, uintptr_t branch_addres
 	return resolved_targets;
 }
 
+bool IsFramePointerRegister(ZydisRegister reg) {
+	return reg != ZYDIS_REGISTER_NONE &&
+	       ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, reg) == ZYDIS_REGISTER_RBP;
+}
+
+// Leaf functions built with a frame pointer can reach the red zone through RBP instead of RSP:
+// after "push rbp; mov rbp, rsp; push ...; sub rsp, N", [rbp - d] lies below RSP once
+// d > rbp - rsp. Tekken 8's Oodle Huffman decoder does this ([rbp - 0x148] with RSP at
+// rbp - 0xc8), and a write-watch fault inside it lets Windows overwrite those slots. The
+// RSP-relative scan cannot see these accesses, so protect such functions conservatively.
+void DetectFramePointerRedZone(DecodedFunction& function, uintptr_t function_start) {
+	const auto at = [&function](uintptr_t address) -> const DecodedCodeInstruction* {
+		const auto it = function.instructions.find(address);
+		return it == function.instructions.end() ? nullptr : &it->second;
+	};
+
+	const auto* push_rbp = at(function_start);
+	if (push_rbp == nullptr || push_rbp->instruction.mnemonic != ZYDIS_MNEMONIC_PUSH ||
+	    push_rbp->operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+	    push_rbp->operands[0].reg.value != ZYDIS_REGISTER_RBP) {
+		return;
+	}
+	uintptr_t   address = function_start + push_rbp->instruction.length;
+	const auto* mov_rbp = at(address);
+	if (mov_rbp == nullptr || mov_rbp->instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+	    mov_rbp->operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+	    mov_rbp->operands[0].reg.value != ZYDIS_REGISTER_RBP ||
+	    mov_rbp->operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+	    mov_rbp->operands[1].reg.value != ZYDIS_REGISTER_RSP) {
+		return;
+	}
+	address += mov_rbp->instruction.length;
+
+	// Distance from RSP up to RBP once the prologue's pushes and SUB RSP are done. Stopping at
+	// the first other instruction can only underestimate it, which over-protects.
+	s64 frame_size = 0;
+	for (const auto* decoded = at(address);
+	     decoded != nullptr && decoded->changes_stack_pointer &&
+	     decoded->stack_pointer_delta.has_value() && *decoded->stack_pointer_delta < 0;
+	     decoded = at(address)) {
+		frame_size -= *decoded->stack_pointer_delta;
+		address += decoded->instruction.length;
+	}
+	if (const auto* next = at(address); next == nullptr || next->changes_stack_pointer) {
+		// An aligning AND RSP or similar leaves the frame size unknown.
+		return;
+	}
+	// Compilers only use the red zone in leaf functions.
+	if (std::ranges::any_of(function.instructions, [](const auto& entry) {
+		    return entry.second.instruction.meta.category == ZYDIS_CATEGORY_CALL;
+	    })) {
+		return;
+	}
+
+	for (const auto& [_, decoded]: function.instructions) {
+		for (u8 index = 0; index < decoded.instruction.operand_count_visible; ++index) {
+			const auto& operand = decoded.operands[index];
+			if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+			    IsFramePointerRegister(operand.mem.base) && operand.mem.disp.value < -frame_size) {
+				function.uses_red_zone                           = true;
+				function.requires_conservative_red_zone_tracking = true;
+				return;
+			}
+		}
+	}
+}
+
 DecodedFunction DecodeFunction(uintptr_t function_start, uintptr_t function_end,
                                uintptr_t segment_start, uintptr_t segment_end) {
 	DecodedFunction               function;
@@ -578,6 +645,7 @@ DecodedFunction DecodeFunction(uintptr_t function_start, uintptr_t function_end,
 		}
 	}
 	function.has_indirect_branch = indirect_branches.size() != resolved_indirect_branches.size();
+	DetectFramePointerRedZone(function, function_start);
 	return function;
 }
 
