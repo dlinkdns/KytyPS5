@@ -1195,6 +1195,9 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	GpuCheckpoints::Mark(vk_buffer, 3, state.vertex_info[0].stage.module->info.shader_hash,
+	                     state.ps_active ? state.ps_input_info.stage.module->info.shader_hash : 0,
+	                     draw.index_count, draw.instance_count, args_buffer.first != nullptr);
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
 	if (mesh_task) {
