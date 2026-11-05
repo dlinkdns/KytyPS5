@@ -918,8 +918,7 @@ void WindowContext::CreateVulkan() {
 	if (GpuCheckpoints::Requested()) {
 		device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
 		GpuCheckpoints::Enabled().store(true);
-		std::printf("GPU checkpoints enabled (VK_NV_device_diagnostic_checkpoints)
-");
+		std::printf("GPU checkpoints enabled (VK_NV_device_diagnostic_checkpoints)\n");
 	}
 
 	std::string rejected_devices;
