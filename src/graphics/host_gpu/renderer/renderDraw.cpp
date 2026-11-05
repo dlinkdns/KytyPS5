@@ -1001,7 +1001,9 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	    state.ps_input_info.ps_depth_export_enable ||
 	    state.ps_input_info.ps_sample_mask_export_enable);
 	vk::ImageAspectFlags feedback;
+	GpuCheckpoints::Mark(buffer.Handle(), 14, 1);
 	const auto rendering = AcquireRenderTargets(buffer, &color, 1, depth, feedback);
+	GpuCheckpoints::Mark(buffer.Handle(), 14, 2);
 	if (depth.load_clear_aspects) {
 		buffer.BeginRendering(rendering);
 	}
@@ -1027,9 +1029,11 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 		               {}, command);
 		destination.Transit(vk::ImageLayout::eTransferDstOptimal,
 		                    vk::AccessFlagBits2::eTransferWrite, {}, command);
+		GpuCheckpoints::Mark(command, 14, 3);
 		command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
 		                  destination.backing.image, vk::ImageLayout::eTransferDstOptimal,
 		                  1, &region);
+		GpuCheckpoints::Mark(command, 14, 4);
 	}
 	return true;
 }
@@ -1099,6 +1103,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	GpuCheckpoints::Mark(buffer.Handle(), 13, 1);
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
@@ -1113,11 +1118,14 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		args_buffer = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
 		EXIT_IF((args_buffer.second & 3u) != 0);
 	}
+	GpuCheckpoints::Mark(buffer.Handle(), 13, 2);
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         feedback_aspects, stages);
+	GpuCheckpoints::Mark(buffer.Handle(), 13, 3, state.depth_info.image_id ? 1 : 0,
+	                     state.color_count);
 	vk::DeviceAddress task_params = 0;
 	if (mesh_task) {
 		const MeshTaskParams params {
@@ -1147,6 +1155,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	if (!mesh_active) {
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
+	GpuCheckpoints::Mark(vk_buffer, 13, 4);
 	using ShaderRecompiler::IR::PushData;
 	const auto draw_dwords =
 	    PushData::GraphicsDrawDwords(mesh_active, state.ps_input_info.object_primitive_id);
@@ -1194,6 +1203,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		buffer.EndRendering();
 		ShaderWriteHazardBarrier(vk_buffer, shader_write_stages);
 	}
+	GpuCheckpoints::Mark(vk_buffer, 13, 5);
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	GpuCheckpoints::Mark(vk_buffer, 3, state.vertex_info[0].stage.module->info.shader_hash,

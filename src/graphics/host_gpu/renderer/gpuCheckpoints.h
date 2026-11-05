@@ -99,6 +99,8 @@ inline void Report(vk::Queue queue) {
 		                   : entry.kind == 10 ? "draw-begin(count,inst)"
 		                   : entry.kind == 11 ? "draw-metadata-op(count,inst)"
 		                   : entry.kind == 12 ? "draw-prepared"
+		                   : entry.kind == 13 ? "draw-step(1 bindings,2 vb/ib,3 targets,4 commit,5 begin-rendering)"
+		                   : entry.kind == 14 ? "copy-depth-to-color-step(1 begin,2 targets,3 pre-copy,4 post-copy)"
 		                                     : "?";
 		std::printf("checkpoint id=%" PRIu64 " stage=%s %s hash=0x%016" PRIx64
 		            " hash2=0x%016" PRIx64 " groups=%ux%ux%u\n",
