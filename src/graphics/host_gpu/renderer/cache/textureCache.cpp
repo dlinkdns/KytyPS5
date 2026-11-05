@@ -989,8 +989,21 @@ void TextureCache::InitializeImage(ImageId id) {
 	if (image.info.samples > 1) {
 		return;
 	}
+	// Experiment: KYTY_SKIP_BUFFER_REUPLOAD=1 keeps an already uploaded image when only GPU buffer
+	// writes (not the CPU) dirtied its memory.
+	static const bool skip_buffer_reupload = [] {
+		const char* value = std::getenv("KYTY_SKIP_BUFFER_REUPLOAD");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (skip_buffer_reupload && image.IsBufferModified() && !image.IsCpuDirty() &&
+	    image.uploaded_once) {
+		image.ClearBufferModified();
+		image.RefreshComplete();
+		return;
+	}
 	const bool upload = image.IsBufferModified() || image.IsCpuDirty();
 	if (upload) {
+		image.uploaded_once = true;
 		static const bool log_uploads = [] {
 			const char* value = std::getenv("KYTY_LOG_UPLOADS");
 			return value != nullptr && value[0] == '1';

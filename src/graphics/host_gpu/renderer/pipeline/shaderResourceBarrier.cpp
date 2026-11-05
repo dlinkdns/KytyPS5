@@ -5,6 +5,7 @@
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderBindings.h"
 
+#include <cstdlib>
 #include <cstring>
 
 namespace Libs::Graphics {
@@ -102,6 +103,14 @@ void ShaderAccessBarrier(vk::CommandBuffer vk_buffer, vk::PipelineStageFlags sou
 
 void ShaderWriteHazardBarrier(vk::CommandBuffer      vk_buffer,
                               vk::PipelineStageFlags destination_stages) {
+	// Experiment: KYTY_NO_WRITE_BARRIER=1 drops this per-dispatch/draw barrier.
+	static const bool skip = [] {
+		const char* value = std::getenv("KYTY_NO_WRITE_BARRIER");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (skip) {
+		return;
+	}
 	const vk::MemoryBarrier barrier {
 	    .srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite,
 	    .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite};

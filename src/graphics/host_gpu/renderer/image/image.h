@@ -139,6 +139,7 @@ public:
 	ImageUsage       usage;
 	ImageBinding     binding;
 	bool             registered     = false;
+	bool             uploaded_once  = false;
 	mutable bool     picked         = false; // Set only while FindImagesInRegion collects it.
 	uint64_t         track_addr     = 0;
 	uint64_t         track_addr_end = 0;
