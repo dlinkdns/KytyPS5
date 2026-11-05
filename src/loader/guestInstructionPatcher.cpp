@@ -13,6 +13,8 @@
 #include <array>
 #include <bitset>
 #include <climits>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <map>
@@ -1557,6 +1559,15 @@ void RelocateGuestInstructions(PatchModule* module, const DecodedFunction& funct
 		const auto& rewrite = rewrite_sites.at(site);
 		if (rewrite.protect_red_zone && decoded.accesses_memory) {
 			++result.unrelocatable_memory_instruction_count;
+			static const bool log_sites = [] {
+				const char* value = std::getenv("KYTY_LOG_UNPROTECTED");
+				return value != nullptr && value[0] == '1';
+			}();
+			if (log_sites) {
+				std::fprintf(stderr, "[unprotected] %016llx len=%u %s\n",
+				             static_cast<unsigned long long>(site), decoded.instruction.length,
+				             ZydisMnemonicGetString(decoded.instruction.mnemonic));
+			}
 		}
 	};
 	const auto overlaps_patched_span = [&patched_spans](uintptr_t start, uintptr_t end) {
