@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -3272,7 +3273,13 @@ int KYTY_SYSV_ABI PthreadCreate(Pthread* thread, const PthreadAttr* attr,
 		EXIT_IF(created_thread->free);
 
 		if (created_thread->attr->stack_addr == nullptr) {
-			created_thread->attr->stack_size += PTHREAD_STACK_EXTRA;
+			// KYTY_STACK_EXTRA_MB overrides the host margin added to emulator-allocated stacks.
+			static const size_t stack_extra = [] {
+				const char* value = std::getenv("KYTY_STACK_EXTRA_MB");
+				const auto  mb    = value != nullptr ? std::strtoull(value, nullptr, 10) : 0;
+				return mb != 0 && mb <= 256 ? static_cast<size_t>(mb) << 20u : PTHREAD_STACK_EXTRA;
+			}();
+			created_thread->attr->stack_size += stack_extra;
 		}
 
 		result = CreateGuestStack(created_thread->attr);
