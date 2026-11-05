@@ -710,6 +710,33 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			}
 			std::printf("\n");
 		}
+		// Bytes around every register and stack value that points at readable memory.
+		{
+			uint64_t values[16 + 32] = {info->rax, info->rbx, info->rcx, info->rdx,
+			                            info->rsi, info->rdi, info->rbp, info->rsp,
+			                            info->r8,  info->r9,  info->r10, info->r11,
+			                            info->r12, info->r13, info->r14, info->r15};
+			int      count           = 16;
+			if (IsReadableRange(info->rsp, 32 * sizeof(uint64_t))) {
+				const auto* stack = reinterpret_cast<const uint64_t*>(info->rsp);
+				for (int i = 0; i < 32; i++) {
+					values[count++] = stack[i];
+				}
+			}
+			for (int i = 0; i < count; i++) {
+				const auto v = values[i];
+				if (v < 0x10000 || !IsReadableRange(v - 16, 64)) {
+					continue;
+				}
+				const auto* bytes = reinterpret_cast<const uint8_t*>(v - 16);
+				std::printf("mem[%s%d] @%016" PRIx64 " (-16..+48):", i < 16 ? "reg" : "stk",
+				            i < 16 ? i : i - 16, v);
+				for (int j = 0; j < 64; j++) {
+					std::printf("%s%02x", (j % 32 == 0) ? "\n " : " ", bytes[j]);
+				}
+				std::printf("\n");
+			}
+		}
 		std::fflush(stdout);
 	}
 	EXIT("Unhandled host exception: type=%u code=%u pc=0x%016" PRIx64

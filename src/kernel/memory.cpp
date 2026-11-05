@@ -16,6 +16,7 @@
 #include <atomic>
 #include <bit>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <magic_enum.hpp>
@@ -82,6 +83,22 @@ static void (*g_test_gpu_range)(bool, uint64_t, size_t) = nullptr;
 static Graphics::RenderContext& GetGpuResources() {
 	EXIT_IF(g_gpu_resources == nullptr);
 	return *g_gpu_resources;
+}
+
+// Diagnostics: KYTY_TRACE_MEM=1 logs guest memory map/unmap and host write-backs to stderr.
+static bool TraceMem() {
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_TRACE_MEM");
+		return v != nullptr && v[0] == '1';
+	}();
+	return enabled;
+}
+
+static void TraceMemRange(const char* what, uint64_t vaddr, uint64_t size) {
+	if (TraceMem()) {
+		std::fprintf(stderr, "[mem] %s %016llx %llx\n", what, static_cast<unsigned long long>(vaddr),
+		             static_cast<unsigned long long>(size));
+	}
 }
 
 static bool IsGpuAddressRange(uint64_t vaddr, uint64_t size) {
@@ -841,6 +858,7 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 }
 
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
+	TraceMemRange("writeback", vaddr, size);
 	return g_guest_address_space->TryWriteBacking(vaddr, data, size);
 }
 
@@ -938,6 +956,7 @@ bool TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size) {
 }
 
 bool CopySparseMemory(uint64_t vaddr, void* data, uint64_t size) {
+	TraceMemRange("sparsewrite", vaddr, size);
 	return g_guest_address_space->CopySparseMemory<true>(vaddr, data, size);
 }
 
@@ -1241,6 +1260,7 @@ bool PhysicalMemory::Release(uint64_t start, size_t len) {
 }
 
 bool PhysicalMemory::Map(uint64_t vaddr, uint64_t phys_addr, size_t len) {
+	TraceMemRange("dmap", vaddr, len);
 	Common::LockGuard lock(m_mutex);
 
 	if (vaddr == 0 || len == 0 || UINT64_MAX - vaddr < len || !CanMapDirect(phys_addr, len)) {
@@ -1330,6 +1350,7 @@ std::map<uint64_t, PhysicalMemory::Mapping>::iterator PhysicalMemory::SplitMappi
 }
 
 bool PhysicalMemory::Unmap(uint64_t vaddr, uint64_t size) {
+	TraceMemRange("dunmap", vaddr, size);
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 	if (g_test_physical_memory_unmaps_before_failure == 0) {
 		g_test_physical_memory_unmaps_before_failure = UINT32_MAX;
@@ -1408,6 +1429,7 @@ std::vector<VirtualRanges::Range> PhysicalMemory::FindMappings(uint64_t phys_add
 }
 
 bool FlexibleMemory::Map(uint64_t vaddr, size_t len, VirtualMemory::Mode mode) {
+	TraceMemRange("fmap", vaddr, len);
 	Common::LockGuard lock(m_mutex);
 	if (len == 0 || len > Size() - std::min(Size(), m_allocated_total)) {
 		return false;
@@ -1455,6 +1477,7 @@ bool FlexibleMemory::Map(uint64_t vaddr, size_t len, VirtualMemory::Mode mode) {
 }
 
 bool FlexibleMemory::Unmap(uint64_t vaddr, uint64_t size) {
+	TraceMemRange("funmap", vaddr, size);
 	Common::LockGuard lock(m_mutex);
 	if (size == 0 || UINT64_MAX - vaddr < size) return false;
 
@@ -1582,6 +1605,7 @@ bool PooledMemory::ReleaseExpansion(uint64_t phys_addr, uint64_t size) {
 }
 
 bool PooledMemory::Allocate(uint64_t vaddr, uint64_t size, std::vector<Mapping>* mappings) {
+	TraceMemRange("pmap", vaddr, size);
 	EXIT_IF(mappings == nullptr);
 	mappings->clear();
 	if (vaddr == 0 || size == 0 || UINT64_MAX - vaddr < size) return false;
@@ -1607,6 +1631,7 @@ bool PooledMemory::Allocate(uint64_t vaddr, uint64_t size, std::vector<Mapping>*
 }
 
 bool PooledMemory::Release(uint64_t vaddr, uint64_t size) {
+	TraceMemRange("punmap", vaddr, size);
 	if (vaddr == 0 || size == 0 || UINT64_MAX - vaddr < size) return false;
 
 	const auto end   = vaddr + size;
