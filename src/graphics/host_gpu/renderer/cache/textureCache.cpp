@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "graphics/host_gpu/renderer/gpuCheckpoints.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/gpu_format.h"
@@ -985,7 +986,13 @@ void TextureCache::InitializeImage(ImageId id) {
 		if (source == nullptr) {
 			EXIT("TextureCache: failed to obtain image upload source\n");
 		}
+		GpuCheckpoints::Mark(m_scheduler.Current().Handle(), 17, image.info.data.address,
+		                     image.info.data.size, image.info.extent.width, image.info.extent.height,
+		                     static_cast<uint32_t>(image.info.pixel_format));
 		UploadImage(image, *source, source_offset);
+		GpuCheckpoints::Mark(m_scheduler.Current().Handle(), 18, image.info.data.address,
+		                     image.info.data.size, image.info.extent.width, image.info.extent.height,
+		                     static_cast<uint32_t>(image.info.pixel_format));
 		image.ClearBufferModified();
 	}
 	image.RefreshComplete();

@@ -18,11 +18,13 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/gpuCheckpoints.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -316,7 +318,16 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 	    (groups + limits.maxComputeWorkGroupCount[0] - 1u) / limits.maxComputeWorkGroupCount[0]);
 	const uint32_t groups_x = static_cast<uint32_t>((groups + groups_y - 1u) / groups_y);
 	EXIT_NOT_IMPLEMENTED(groups_y > limits.maxComputeWorkGroupCount[1]);
+	GpuCheckpoints::Mark(command, 15, tiling.num_texels, (uint64_t {source_capacity} << 32u) | target_capacity,
+	                     groups_x, groups_y, tiling.pipeline_slot);
+	if (GpuCheckpoints::Requested() && tiling.num_texels >= (1u << 26u)) {
+		std::printf("large tiler dispatch: texels=%u groups=%ux%u slot=%u source=%llu target=%llu\n",
+		            tiling.num_texels, groups_x, groups_y, static_cast<uint32_t>(tiling.pipeline_slot),
+		            static_cast<unsigned long long>(source_capacity),
+		            static_cast<unsigned long long>(target_capacity));
+	}
 	command.dispatch(groups_x, groups_y, 1);
+	GpuCheckpoints::Mark(command, 16, tiling.num_texels, 0, groups_x, groups_y, tiling.pipeline_slot);
 
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eMemoryRead;
