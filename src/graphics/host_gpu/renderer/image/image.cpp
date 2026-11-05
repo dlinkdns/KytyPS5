@@ -277,8 +277,21 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	                     (uint64_t {copies[0].bufferRowLength} << 32u) | copies[0].bufferImageHeight,
 	                     copies[0].imageExtent.width, copies[0].imageExtent.height,
 	                     static_cast<uint32_t>(copies.size()));
+	// NVIDIA drivers can hang copying a buffer into the stencil aspect when the copy names a
+	// padded image height (Tekken 8: 3840x2160 stencil with bufferImageHeight 2304). A single
+	// layer never steps to a second slice, so tightly packed values address the same bytes.
+	std::vector<vk::BufferImageCopy> regions(copies.begin(), copies.end());
+	for (auto& region: regions) {
+		if ((region.imageSubresource.aspectMask & vk::ImageAspectFlagBits::eStencil) &&
+		    region.imageSubresource.layerCount == 1 && region.imageExtent.depth == 1) {
+			region.bufferImageHeight = 0;
+			if (region.bufferRowLength == region.imageExtent.width) {
+				region.bufferRowLength = 0;
+			}
+		}
+	}
 	command.copyBufferToImage(buffer, backing.image, vk::ImageLayout::eTransferDstOptimal,
-	                          static_cast<uint32_t>(copies.size()), copies.data());
+	                          static_cast<uint32_t>(regions.size()), regions.data());
 	GpuCheckpoints::Mark(command, 20, static_cast<uint32_t>(backing.format));
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
 	buffer_barrier.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
