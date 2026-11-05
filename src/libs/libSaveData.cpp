@@ -666,13 +666,26 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond,
 	result->hit_num = static_cast<uint32_t>(dir_list.size());
 	result->set_num = static_cast<uint32_t>(max_count);
 
+	// A failed search reports no hits: Terminator Resistance (PPSA02474) frees dir_names on an error
+	// but still walks hit_num entries of it.
+	const auto fail = [result](int status) {
+		result->hit_num = 0;
+		result->set_num = 0;
+		return status;
+	};
+
 	for (size_t i = 0; i < max_count; i++) {
 		std::snprintf(result->dir_names[i].data, sizeof(result->dir_names[i].data), "%s",
 		              dir_list[i].name.c_str());
 		if (result->params != nullptr) {
-			const int status = load_save_param(root / dir_list[i].name, &result->params[i]);
+			// The guest may be rewriting param.bin on another thread; give the write time to finish.
+			int status = load_save_param(root / dir_list[i].name, &result->params[i]);
+			for (int retry = 0; status != OK && retry < 10; retry++) {
+				Common::Thread::SleepMicro(20000);
+				status = load_save_param(root / dir_list[i].name, &result->params[i]);
+			}
 			if (status != OK) {
-				return status;
+				return fail(status);
 			}
 		}
 		if (result->infos != nullptr) {
@@ -680,7 +693,7 @@ int KYTY_SYSV_ABI SaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond,
 			info = {};
 			const int status = read_save_blocks(root / dir_list[i].name, &info.blocks);
 			if (status != OK) {
-				return status;
+				return fail(status);
 			}
 			// Host-directory saves report their allocation as free space.
 			info.free_blocks = info.blocks;
