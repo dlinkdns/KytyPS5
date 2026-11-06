@@ -75,6 +75,18 @@ bool CanSplitWave(const IR::Program& program, ShaderStageInputInfo input_info) {
 				// subgroup); LiveMask joins the halves' ballots.
 				case IR::ValueOpcode::DataAppend: blocker = "no (ds_append)"; break;
 				case IR::ValueOpcode::DataConsume: blocker = "no (ds_consume)"; break;
+				// Shaders built on these exchange data between lanes constantly. Across several
+				// waves every exchange is a spinning handshake, which made Tekken 8's
+				// 0x5c1cdc3b2a99dd3d 15% slower than two lanes per invocation.
+				case IR::ValueOpcode::DppMoveU32:
+				case IR::ValueOpcode::DppUpdateU32:
+				case IR::ValueOpcode::LiveMask:
+				case IR::ValueOpcode::Permlane16U32:
+				case IR::ValueOpcode::PermuteU32:
+				case IR::ValueOpcode::BpermuteU32:
+				case IR::ValueOpcode::SwizzleU32:
+					if (waves > 1u) blocker = "no (multi-wave with lane permutes)";
+					break;
 				default: break;
 			}
 			if (blocker != nullptr) {
