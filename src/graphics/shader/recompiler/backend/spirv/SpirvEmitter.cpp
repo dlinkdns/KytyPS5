@@ -61,7 +61,7 @@ bool CanSplitWave(const IR::Program& program, ShaderStageInputInfo input_info) {
 	// Several waves need whole waves; their exchange words and handshake counters share LDS.
 	if (threads % 64u != 0u || waves == 0u || waves > 16u ||
 	    (waves > 1u && !SplitMultiWaveEnabled()) || program.info.compute_derivatives ||
-	    program.info.shared_int64_atomics || program.info.uses_swizzle ||
+	    program.info.shared_int64_atomics ||
 	    (cs.lds_storage ? 0u : cs.lds_size_dwords * 4u) + threads * 4u + waves * 8u + 256u >
 	        48u * 1024u) {
 		ReportSplit(program, threads, "no (workgroup, derivatives, int64 LDS atomics, swizzle or LDS size)");
@@ -69,17 +69,17 @@ bool CanSplitWave(const IR::Program& program, ShaderStageInputInfo input_info) {
 	}
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
+			const char* blocker = nullptr;
 			switch (inst.GetOpcode()) {
-				case IR::ValueOpcode::LiveMask:
-				case IR::ValueOpcode::Permlane16U32:
-				case IR::ValueOpcode::PermuteU32:
-				case IR::ValueOpcode::BpermuteU32:
-				case IR::ValueOpcode::DataAppend:
-				case IR::ValueOpcode::DataConsume:
-				case IR::ValueOpcode::SwizzleU32:
-					ReportSplit(program, threads, "no (cross-lane opcode)");
-					return false;
+				// LDS permutes, swizzles and permlane16 stay within a 32-lane half (the host
+				// subgroup); LiveMask joins the halves' ballots.
+				case IR::ValueOpcode::DataAppend: blocker = "no (ds_append)"; break;
+				case IR::ValueOpcode::DataConsume: blocker = "no (ds_consume)"; break;
 				default: break;
+			}
+			if (blocker != nullptr) {
+				ReportSplit(program, threads, blocker);
+				return false;
 			}
 		}
 	}

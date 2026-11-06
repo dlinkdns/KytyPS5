@@ -864,8 +864,20 @@ uint32_t EmitBallot(ValueEmitContext& ctx, IR::Value predicate) {
 uint32_t EmitLiveMask(EmitterState& state) {
 	const auto helper =
 	    EmitNative<spv::OpLoad, IR::Type::U1>(state, state.helper_invocation_variable);
-	return EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(
+	const auto ballot = EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(
 	    state, ConstantU32(state, spv::ScopeSubgroup), EmitLogicalNotBool(state, helper));
+	if (!state.split_wave) {
+		return ballot;
+	}
+	// The wave's mask joins both host subgroups' ballots.
+	const auto word = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word, ballot, 0);
+	const auto [low, high] = EmitSplitWaveExchangeHalves(state, word);
+	const auto zero        = ConstantU32(state, 0);
+	const auto result      = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), result, low, high,
+	                          zero, zero);
+	return result;
 }
 
 uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
