@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "common/common.h"
 #include "common/profiler.h"
 #include "common/threads.h"
@@ -29,11 +30,13 @@ void CommandBuffer::Begin() {
 	auto result = buffer.begin(&begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	CommandRecorder::Begin(buffer);
 }
 
 void CommandBuffer::End() const {
 	EndRendering();
 	auto buffer = Handle();
+	CommandRecorder::End(buffer);
 
 	auto result = buffer.end();
 

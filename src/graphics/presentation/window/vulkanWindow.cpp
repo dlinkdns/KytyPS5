@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/commandRecorder.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -953,6 +954,7 @@ void WindowContext::CreateVulkan() {
 
 	graphic_ctx.device = VulkanCreateDevice(graphic_ctx, std::move(device_extensions));
 	VULKAN_HPP_DEFAULT_DISPATCHER.init(graphic_ctx.device);
+	CommandRecorder::Install();
 	graphic_ctx.device.getQueue(graphic_ctx.queue_family, 0, &graphic_ctx.queue);
 	EXIT_IF(graphic_ctx.queue == nullptr);
 	GpuCheckpoints::Profile::Init(graphic_ctx.device,
