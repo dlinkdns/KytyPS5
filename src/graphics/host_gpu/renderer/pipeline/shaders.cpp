@@ -4,6 +4,7 @@
 #include "gpu_blit_shaders/gpu_mesh_indirect_spv.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/gpuCheckpoints.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"

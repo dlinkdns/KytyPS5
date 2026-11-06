@@ -103,6 +103,10 @@ DppTargetLane EmitDppTargetLane(EmitterState& state, const IR::DppMoveFlags& fla
 }
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state) {
+	if (state.split_wave) {
+		// The workgroup is exactly one wave, so its invocation index is the guest lane.
+		return EmitLocalInvocationIndex(state);
+	}
 	if (state.subgroup_local_invocation_id_variable == 0) {
 		EXIT("SubgroupLocalInvocationId was not declared before SPIR-V function emission\n");
 	}

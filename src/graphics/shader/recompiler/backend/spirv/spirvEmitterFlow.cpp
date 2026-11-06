@@ -820,6 +820,19 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 		predicate = Binary(ctx.state, zero ? spv::OpLogicalAnd : spv::OpLogicalOr,
 		                   TypeBool(ctx.state), predicate, ctx.HalfArg(inst, 0, 1));
 	}
+	if (ctx.state.split_wave) {
+		// Vote in each host subgroup, then combine the two halves' votes.
+		auto&      state = ctx.state;
+		const auto vote  = state.builder.AllocateId();
+		state.builder.AddFunction(zero ? spv::OpGroupNonUniformAll : spv::OpGroupNonUniformAny,
+		                          TypeBool(state), vote, ConstantU32(state, spv::ScopeSubgroup),
+		                          predicate);
+		const auto [low, high] = EmitSplitWaveExchangeHalves(
+		    state, Select(state, TypeU32(state), vote, ConstantU32(state, 1), ConstantU32(state, 0)));
+		const auto both = Binary(state, zero ? spv::OpBitwiseAnd : spv::OpBitwiseOr, TypeU32(state),
+		                         low, high);
+		return Binary(state, spv::OpINotEqual, TypeBool(state), both, ConstantU32(state, 0));
+	}
 	const auto result = ctx.state.builder.AllocateId();
 	ctx.state.builder.AddFunction(zero ? spv::OpGroupNonUniformAll : spv::OpGroupNonUniformAny,
 	                              TypeBool(ctx.state), result,
@@ -859,6 +872,11 @@ static uint32_t EmitSubgroupReduceU32(ValueEmitContext& ctx, const IR::Inst& ins
 	state.builder.AddFunction(Reduce, TypeU32(state), result,
 	                          ConstantU32(state, spv::ScopeSubgroup), spv::GroupOperationReduce,
 	                          value);
+	if (state.split_wave) {
+		// Each host subgroup reduced its half; combine the two partial results.
+		const auto [low, high] = EmitSplitWaveExchangeHalves(state, result);
+		return Combine(state, low, high);
+	}
 	return result;
 }
 

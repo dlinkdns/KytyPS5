@@ -475,7 +475,7 @@ void DefineInputs(EmitterState& state) {
 		add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		add_builtin(IR::StageInputKind::NumWorkgroups, 3, "gl_NumWorkGroups");
 	}
-	if (state.lane_count == 2) {
+	if (state.lane_count == 2 || state.split_wave) {
 		add_builtin(IR::StageInputKind::LocalInvocationIndex, 1, "gl_LocalInvocationIndex");
 		if (std::ranges::any_of(state.inputs, [](const InputBinding& input) {
 			    return input.kind == IR::StageInputKind::GlobalInvocationId;
@@ -715,6 +715,11 @@ void DefineModule(EmitterState& state) {
 	DefineOutputs(state);
 	DefineTessellationInterfaces(state);
 	DefineDescriptors(state);
+	if (state.split_wave) {
+		state.wave_exchange_variable = state.builder.DefineGlobalVariable(
+		    TypeU32ArrayPointer(state, spv::StorageClassWorkgroup, 64u), spv::StorageClassWorkgroup);
+		state.builder.AddName(state.wave_exchange_variable, "wave_exchange");
+	}
 	if (state.program.info.function_lds) {
 		state.lds_variable = state.builder.AllocateId();
 	}
@@ -796,16 +801,16 @@ void DefineModule(EmitterState& state) {
 	if (state.program.info.image_gather_extended) {
 		state.builder.RequireCapability(spv::CapabilityImageGatherExtended);
 	}
-	if (state.lane_count == 2 || state.program.info.subgroup_barrier ||
+	if (state.lane_count == 2 || state.split_wave || state.program.info.subgroup_barrier ||
 	    state.program.info.subgroup_ballot || state.program.info.subgroup_vote ||
 	    state.program.info.subgroup_shuffle ||
 	    state.program.info.subgroup_arithmetic || state.program.info.subgroup_local_invocation_id) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
-	if (state.lane_count == 2 || state.program.info.subgroup_ballot) {
+	if (state.lane_count == 2 || state.split_wave || state.program.info.subgroup_ballot) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformBallot);
 	}
-	if (state.program.info.subgroup_vote) {
+	if (state.split_wave || state.program.info.subgroup_vote) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformVote);
 	}
 	if (state.program.info.subgroup_shuffle) {

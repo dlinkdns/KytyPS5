@@ -515,7 +515,7 @@ void BuildStageStaticKey(const ShaderComputeInputInfo& info, std::vector<uint32_
 	key.clear();
 	key.push_back(info.workgroup_register);
 	key.push_back(info.wave_size | (static_cast<uint32_t>(info.float_mode) << 8u));
-	key.push_back(info.host_subgroup_size);
+	key.push_back(info.host_subgroup_size | (info.split_wave64 ? 0x10000u : 0u));
 	key.push_back(info.thread_ids_num);
 	key.push_back(info.lds_size_dwords);
 	key.push_back(info.scratch_size_dwords);

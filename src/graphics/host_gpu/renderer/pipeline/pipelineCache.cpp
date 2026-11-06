@@ -890,6 +890,11 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                      ShaderComputeInputInfo&      input_info) {
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
+	static const bool split_wave64 = [] {
+		const char* value = std::getenv("KYTY_SPLIT_WAVE64");
+		return value != nullptr && value[0] == '1';
+	}();
+	input_info.split_wave64 = split_wave64 && input_info.host_subgroup_size == 32u;
 	const auto        params      = PrepareProgram(regs, input_info);
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;

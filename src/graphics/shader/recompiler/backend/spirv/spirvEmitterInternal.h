@@ -112,6 +112,10 @@ struct EmitterState {
 
 	uint32_t                                         lane_count              = 1;
 	uint32_t                                         lane_half               = 0;
+	// One guest wave64 runs as two 32-wide host subgroups, one lane per invocation; whole-wave
+	// operations combine the halves through wave_exchange_variable (64 dwords of shared memory).
+	bool                                             split_wave              = false;
+	uint32_t                                         wave_exchange_variable  = 0;
 	std::array<BufferDefinition, 4>                  storage_buffers {};
 	std::vector<uint32_t>                           memory_byte_offsets;
 	std::vector<uint32_t>                           memory_byte_sizes;
@@ -317,6 +321,11 @@ uint32_t MrtOutputType(EmitterState& state, uint32_t index);
 uint32_t ConstantU32(EmitterState& state, uint32_t value);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
+// Split waves: publishes each invocation's word, then returns the words of lanes 0 and 32 (one
+// per host subgroup). Needs control flow that is uniform across the wave.
+std::pair<uint32_t, uint32_t> EmitSplitWaveExchangeHalves(EmitterState& state, uint32_t word);
+// Split waves: reads a u32 from another lane of the 64-lane wave.
+uint32_t EmitSplitWaveReadLane(EmitterState& state, uint32_t value, uint32_t lane);
 
 [[noreturn]] void ExitDescriptorBindingFailure(const EmitterState&       state,
                                                IR::DescriptorBindingKind kind, uint32_t resource,

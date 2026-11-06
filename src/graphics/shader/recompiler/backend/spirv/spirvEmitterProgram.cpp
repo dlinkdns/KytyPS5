@@ -472,9 +472,67 @@ uint32_t ValueEmitContext::HalfArg(const IR::Inst& inst, size_t index, uint32_t 
 	return lane_half == half ? Arg(inst, index) : other_half->Arg(inst, index);
 }
 
+namespace {
+
+void EmitSplitWaveBarrier(EmitterState& state) {
+	state.builder.AddFunction(
+	    spv::OpControlBarrier, ConstantU32(state, spv::ScopeWorkgroup),
+	    ConstantU32(state, spv::ScopeWorkgroup),
+	    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask |
+	                           spv::MemorySemanticsWorkgroupMemoryMask));
+}
+
+uint32_t SplitWaveSlot(EmitterState& state, uint32_t lane) {
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain,
+	                          TypeU32ElementPointer(state, spv::StorageClassWorkgroup), pointer,
+	                          state.wave_exchange_variable, lane);
+	return pointer;
+}
+
+// Every invocation stores its word in its own slot; the barriers keep this exchange's reads
+// apart from the previous and the next exchange's writes.
+void SplitWavePublish(EmitterState& state, uint32_t word) {
+	EmitSplitWaveBarrier(state);
+	state.builder.AddFunction(spv::OpStore, SplitWaveSlot(state, EmitLocalInvocationIndex(state)),
+	                          word);
+	EmitSplitWaveBarrier(state);
+}
+
+uint32_t SplitWaveLoad(EmitterState& state, uint32_t lane) {
+	const auto value = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, SplitWaveSlot(state, lane));
+	return value;
+}
+
+} // namespace
+
+std::pair<uint32_t, uint32_t> EmitSplitWaveExchangeHalves(EmitterState& state, uint32_t word) {
+	SplitWavePublish(state, word);
+	return {SplitWaveLoad(state, ConstantU32(state, 0)), SplitWaveLoad(state, ConstantU32(state, 32))};
+}
+
+uint32_t EmitSplitWaveReadLane(EmitterState& state, uint32_t value, uint32_t lane) {
+	SplitWavePublish(state, value);
+	return SplitWaveLoad(state, EmitAndConstant(state, lane, 63u));
+}
+
 uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
 	const auto ballot_type = TypeU32Vector(state, 4);
 	const auto scope       = ConstantU32(state, spv::ScopeSubgroup);
+	if (state.split_wave) {
+		// Each host subgroup ballots its 32 lanes; the two words make the wave's 64-bit mask.
+		const auto local = state.builder.AllocateId();
+		const auto word  = state.builder.AllocateId();
+		const auto mask  = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, local, scope,
+		                          Def(predicate));
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), word, local, 0);
+		const auto [low_word, high_word] = EmitSplitWaveExchangeHalves(state, word);
+		state.builder.AddFunction(spv::OpCompositeConstruct, ballot_type, mask, low_word,
+		                          high_word, ConstantU32(state, 0), ConstantU32(state, 0));
+		return mask;
+	}
 	const auto low         = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, low, scope,
 	                          other_half == nullptr || half == 0 ? Def(predicate)
@@ -519,6 +577,27 @@ uint32_t ValueEmitContext::FirstLane(uint32_t ballot) {
 uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t lane) {
 	const auto type  = TypeId(state, inst.Arg(index).GetType());
 	const auto scope = ConstantU32(state, spv::ScopeSubgroup);
+	if (state.split_wave) {
+		// The source lane may sit in the other host subgroup, so values go through shared memory.
+		auto value = Arg(inst, index);
+		if (type == TypeBool(state)) {
+			value = Select(state, TypeU32(state), value, ConstantU32(state, 1), ConstantU32(state, 0));
+		} else if (type != TypeU32(state)) {
+			const auto bits = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpBitcast, TypeU32(state), bits, value);
+			value = bits;
+		}
+		const auto read = EmitSplitWaveReadLane(state, value, lane);
+		if (type == TypeBool(state)) {
+			return Binary(state, spv::OpINotEqual, TypeBool(state), read, ConstantU32(state, 0));
+		}
+		if (type == TypeU32(state)) {
+			return read;
+		}
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpBitcast, type, result, read);
+		return result;
+	}
 	const auto low   = state.builder.AllocateId();
 	if (other_half == nullptr) {
 		state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope, Arg(inst, index),

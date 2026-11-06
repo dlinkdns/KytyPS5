@@ -4,6 +4,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 
@@ -15,6 +16,40 @@ namespace {
 	EXIT("SPIR-V validation failed: hash=0x%016" PRIx64 " stage=%u reason=%s\n",
 	     program.shader_hash, static_cast<unsigned>(program.stage), reason);
 	std::abort();
+}
+
+// Whether a wave64 compute program can run one guest lane per host invocation on a 32-wide host.
+// The whole workgroup must be one wave, so a workgroup barrier joins exactly its two host
+// subgroups (branches are wave-uniform, so both reach every exchange), and every cross-lane
+// operation must be one the split emitters handle.
+bool CanSplitWave(const IR::Program& program, ShaderStageInputInfo input_info) {
+	if (program.stage != ShaderType::Compute || !input_info.compute->split_wave64) {
+		return false;
+	}
+	const auto& cs      = *input_info.compute;
+	const auto  threads = std::max(cs.threads_num[0], 1u) * std::max(cs.threads_num[1], 1u) *
+	                     std::max(cs.threads_num[2], 1u);
+	if (threads != 64u || program.info.compute_derivatives || program.info.shared_int64_atomics ||
+	    program.info.uses_swizzle || cs.lds_size_dwords * 4u + 256u > 48u * 1024u) {
+		return false;
+	}
+	for (const auto* block: program.blocks) {
+		for (const auto& inst: *block) {
+			switch (inst.GetOpcode()) {
+				case IR::ValueOpcode::DppMoveU32:
+				case IR::ValueOpcode::DppUpdateU32:
+				case IR::ValueOpcode::LiveMask:
+				case IR::ValueOpcode::Permlane16U32:
+				case IR::ValueOpcode::PermuteU32:
+				case IR::ValueOpcode::BpermuteU32:
+				case IR::ValueOpcode::DataAppend:
+				case IR::ValueOpcode::DataConsume:
+				case IR::ValueOpcode::SwizzleU32: return false;
+				default: break;
+			}
+		}
+	}
+	return true;
 }
 
 } // namespace
@@ -43,6 +78,10 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
 	        ? 2u
 	        : 1u;
+	if (state.lane_count == 2u && CanSplitWave(program, input_info)) {
+		state.lane_count = 1u;
+		state.split_wave = true;
+	}
 	DefineModule(state);
 	EmitProgram(state);
 	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
