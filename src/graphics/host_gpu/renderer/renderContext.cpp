@@ -5,6 +5,8 @@
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 
+#include <cstdlib>
+#include <utility>
 #include <algorithm>
 
 namespace Libs::Graphics {
@@ -128,7 +130,31 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 	m_gpu->SendCommandSync(unmap);
 }
 
+namespace {
+
+bool BdaSyncPerDraw() {
+	// KYTY_BDA_SYNC_PER_DRAW=1: every BDA-reading draw or dispatch uploads the CPU writes queued
+	// so far. By default they upload at the start of each guest command buffer, as the guest
+	// writes data before submitting the work that reads it. Per-draw syncs mostly found a few
+	// fresh pages and ended the render pass for them (about 5 us per draw in Tekken 8).
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_BDA_SYNC_PER_DRAW");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
+} // namespace
+
 void RenderContext::PrepareBda() {
+	if (BdaSyncPerDraw() || std::exchange(m_bda_sync_requested, false)) {
+		SyncBda();
+	}
+	m_fault_process_pending = true;
+}
+
+void RenderContext::SyncBda() {
+	m_bda_sync_requested = false;
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	// One upload per buffer: separate uploads each ended the render pass and added barriers.
 	std::vector<std::pair<uint64_t, uint64_t>> ranges;
@@ -141,7 +167,6 @@ void RenderContext::PrepareBda() {
 	if (!ranges.empty()) {
 		m_buffer_cache.SynchronizeBuffersInRanges(ranges);
 	}
-	m_fault_process_pending = true;
 }
 
 void RenderContext::RunGarbageCollector() {

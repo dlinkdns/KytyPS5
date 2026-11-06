@@ -205,6 +205,7 @@ void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operatio
 void CommandProcessor::BufferInit() {
 	GetScheduler().Begin(m_ctx, m_ucfg, m_sh_ctx);
 	m_renderer.GetBufferCache().RefreshStickyPages();
+	m_renderer.SyncBda();
 }
 
 void CommandProcessor::BufferFlush() {
@@ -260,6 +261,8 @@ template void CommandProcessor::WaitRegMem<uint64_t>(uint32_t, const uint64_t*, 
                                                      uint32_t);
 
 void CommandProcessor::MemSemaphore(uint64_t* counter, bool signal, bool write) {
+	// A later BDA reader in this command buffer must see the store.
+	m_renderer.RequestBdaSync();
 	if (signal) {
 		*counter = write ? 1u : *counter + 1u;
 	} else if (*counter == 0) {
@@ -271,6 +274,8 @@ void CommandProcessor::MemSemaphore(uint64_t* counter, bool signal, bool write) 
 
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num,
                                  uint32_t write_control) {
+	// A later BDA reader in this command buffer must see the store.
+	m_renderer.RequestBdaSync();
 	const uint32_t dst_sel = ((write_control >> 30u) & 0x1u) | ((write_control >> 7u) & 0x1eu);
 	const bool     write_one_address = ((write_control >> 16u) & 0x1u) != 0;
 
@@ -300,6 +305,8 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 }
 
 void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_bytes) {
+	// A later BDA reader in this command buffer must see the store.
+	m_renderer.RequestBdaSync();
 	if (dst_address == 0 || (num_bytes != sizeof(uint32_t) && num_bytes != sizeof(uint64_t)) ||
 	    (dst_address & (num_bytes - 1u)) != 0) {
 		EXIT("invalid reference-clock copy, dst=0x%016" PRIx64 " size=%u\n", dst_address,
@@ -316,6 +323,8 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 }
 
 void CommandProcessor::GetLodStats(volatile uint32_t* dst, uint32_t size, bool reset) {
+	// A later BDA reader in this command buffer must see the store.
+	m_renderer.RequestBdaSync();
 	auto& counters = m_renderer.GetRenderExecutor().m_mip_stats;
 	// Each of up to 256 2-dword slots after the 16-dword header holds the clamped sample count
 	// (dword 0 bits 0-23), the slot id (bits 24-31), the unclamped sample count (dword 1 bits 0-23)
@@ -338,6 +347,8 @@ void CommandProcessor::GetLodStats(volatile uint32_t* dst, uint32_t size, bool r
 
 void CommandProcessor::DmaData(uint8_t dst_sel, uint64_t dst_address_or_offset, uint8_t src_sel,
                                uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes) {
+	// A later BDA reader in this command buffer must see the store.
+	m_renderer.RequestBdaSync();
 	if (num_bytes == 0 || static_cast<uint32_t>(dst_address_or_offset) == 0x3022cu) {
 		return;
 	}
@@ -888,6 +899,8 @@ void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_
 
 void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector, void* address,
                                   uint64_t data, uint32_t interrupt_context_id) {
+	// A later BDA reader in this command buffer must see the store.
+	m_renderer.RequestBdaSync();
 	if (graphics_debug_dump_enabled()) {
 		LOGF("CommandProcessor::ReleaseMem()\n"
 		     "\t data_sel           = %" PRIu32 "\n"

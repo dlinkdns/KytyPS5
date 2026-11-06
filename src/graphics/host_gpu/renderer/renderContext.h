@@ -59,6 +59,10 @@ public:
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
 	void               PrepareBda();
+	// Uploads guest CPU writes queued for BDA readers; once per guest command buffer.
+	void               SyncBda();
+	// The command processor stored to guest memory: the next BDA reader syncs first.
+	void               RequestBdaSync() { m_bda_sync_requested = true; }
 	void               RunGarbageCollector();
 
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
@@ -88,6 +92,7 @@ private:
 	std::unique_ptr<GuestGpu> m_gpu;
 	VideoOut::VideoOutDriver* m_video_out = nullptr;
 	bool                      m_fault_process_pending = false;
+	bool                      m_bda_sync_requested    = false;
 
 	Common::Mutex                        m_interrupt_mutex;
 	std::vector<InterruptEqRegistration> m_interrupt_eqs;
