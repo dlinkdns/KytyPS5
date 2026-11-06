@@ -136,6 +136,14 @@ private:
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	// Downloads GPU-written bytes that only already-submitted work wrote, in a submission of
+	// its own: waits for that work, not for the batch being recorded. Returns false, changing
+	// nothing, when it does not apply.
+	[[nodiscard]] bool DownloadOutOfBand(Buffer& buffer, uint64_t vaddr, uint64_t size,
+	                                     bool& downloaded);
+	// GPU writes recorded into the command buffer being built.
+	void               NoteBatchWrite(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool HasBatchWrite(uint64_t vaddr, uint64_t size);
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
 	// Waits for prefetched downloads over the range to publish; returns whether any did.
 	bool               WaitPrefetchedDownloads(uint64_t vaddr, uint64_t size);
@@ -149,6 +157,12 @@ private:
 	std::vector<PrefetchedDownload>                   m_prefetched_downloads;
 	// Download-window start -> remaining prefetch credit.
 	std::map<uint64_t, uint32_t>                      m_readback_hot;
+	RangeSet                                          m_batch_writes;
+	uint64_t                                          m_batch_writes_tick = 0;
+	vk::CommandPool                                   m_oob_pool    = nullptr;
+	vk::CommandBuffer                                 m_oob_command = nullptr;
+	vk::Fence                                         m_oob_fence   = nullptr;
+	std::unique_ptr<Buffer>                           m_oob_download;
 	uint64_t                                          m_gpu_write_epoch = 0;
 	uint64_t                                          m_prefetch_epoch  = 0;
 

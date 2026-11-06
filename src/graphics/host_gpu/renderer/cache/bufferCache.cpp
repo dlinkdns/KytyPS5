@@ -278,6 +278,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	if (m_oob_fence) {
+		m_graphics.device.destroyFence(m_oob_fence, nullptr);
+	}
+	if (m_oob_pool) {
+		m_graphics.device.destroyCommandPool(m_oob_pool, nullptr);
+	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -389,7 +395,10 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			// A prefetch took its bytes out of the dirty ranges; they reach guest memory when it
 			// publishes, which is usually already done.
 			const bool prefetched = WaitPrefetchedDownloads(start, end - start);
-			const bool downloaded = DownloadBufferMemory<false>(buffer, start, end - start);
+			bool       downloaded = false;
+			if (!DownloadOutOfBand(buffer, start, end - start, downloaded)) {
+				downloaded = DownloadBufferMemory<false>(buffer, start, end - start);
+			}
 			// With no GPU-written bytes left in the window, its pages may lose GPU ownership.
 			if (downloaded || !m_gpu_modified_ranges.Intersects(start, end - start)) {
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
@@ -523,6 +532,152 @@ void BufferCache::PrefetchReadbacks() {
 	}
 }
 
+void BufferCache::NoteBatchWrite(uint64_t vaddr, uint64_t size) {
+	const auto tick = m_scheduler.CurrentTick();
+	if (m_batch_writes_tick != tick) {
+		m_batch_writes      = {};
+		m_batch_writes_tick = tick;
+	}
+	m_batch_writes.Add(vaddr, size);
+}
+
+bool BufferCache::HasBatchWrite(uint64_t vaddr, uint64_t size) {
+	return m_batch_writes_tick == m_scheduler.CurrentTick() &&
+	       m_batch_writes.Intersects(vaddr, size);
+}
+
+namespace {
+
+bool OutOfBandDownloadsEnabled() {
+	// On by default; KYTY_NO_OOB_DOWNLOAD=1 always flushes the batch being recorded.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_NO_OOB_DOWNLOAD");
+		return value == nullptr || value[0] != '1';
+	}();
+	return enabled;
+}
+
+constexpr uint64_t OutOfBandDownloadSize = 8 * MiB;
+
+} // namespace
+
+bool BufferCache::DownloadOutOfBand(Buffer& buffer, uint64_t vaddr, uint64_t size,
+                                    bool& downloaded) {
+	downloaded = false;
+	if (!OutOfBandDownloadsEnabled() || HasBatchWrite(vaddr, size)) {
+		return false;
+	}
+	// Plan the copies without changing any state yet.
+	std::vector<vk::BufferCopy> copies;
+	uint64_t                    total_size     = 0;
+	const auto                  buffer_address = buffer.CpuAddress();
+	m_memory_tracker.ForEachDownloadRange<false>(
+	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+			    copies.emplace_back(start - buffer_address, total_size, end - start);
+			    total_size += Common::AlignUp(end - start, 64);
+		    });
+	    });
+	if (copies.empty()) {
+		return false;
+	}
+	if (total_size > OutOfBandDownloadSize) {
+		return false;
+	}
+	const auto& device = m_graphics.device;
+	if (!m_oob_pool) {
+		vk::CommandPoolCreateInfo pool_info {};
+		pool_info.queueFamilyIndex = m_graphics.queue_family;
+		pool_info.flags            = vk::CommandPoolCreateFlagBits::eResetCommandBuffer |
+		                  vk::CommandPoolCreateFlagBits::eTransient;
+		EXIT_NOT_IMPLEMENTED(device.createCommandPool(&pool_info, nullptr, &m_oob_pool) !=
+		                     vk::Result::eSuccess);
+		vk::CommandBufferAllocateInfo allocate {};
+		allocate.commandPool        = m_oob_pool;
+		allocate.level              = vk::CommandBufferLevel::ePrimary;
+		allocate.commandBufferCount = 1;
+		EXIT_NOT_IMPLEMENTED(device.allocateCommandBuffers(&allocate, &m_oob_command) !=
+		                     vk::Result::eSuccess);
+		vk::FenceCreateInfo fence_info {};
+		EXIT_NOT_IMPLEMENTED(device.createFence(&fence_info, nullptr, &m_oob_fence) !=
+		                     vk::Result::eSuccess);
+		m_oob_download = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Download,
+		                                          0, vk::BufferUsageFlagBits::eTransferDst,
+		                                          OutOfBandDownloadSize);
+		SetVulkanObjectNameF(device, m_oob_download->Handle(), "Kyty.OutOfBandDownload");
+	}
+
+	// Commit: the bytes leave the dirty set now and reach guest memory before returning.
+	m_memory_tracker.ForEachDownloadRange<false>(
+	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    ForgetColorMetadataChecks(address, bytes);
+	    });
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferDownloadBytes, total_size);
+
+	EXIT_NOT_IMPLEMENTED(m_oob_command.reset({}) != vk::Result::eSuccess);
+	vk::CommandBufferBeginInfo begin {};
+	begin.flags = vk::CommandBufferUsageFlagBits::eOneTimeSubmit;
+	EXIT_NOT_IMPLEMENTED(m_oob_command.begin(&begin) != vk::Result::eSuccess);
+	// Earlier submissions on this queue are in the first scope of the barrier.
+	vk::BufferMemoryBarrier before {};
+	before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+	before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+	before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	before.buffer              = buffer.Handle();
+	before.offset              = 0;
+	before.size                = buffer.Size();
+	m_oob_command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+	                              vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before,
+	                              0, nullptr);
+	m_oob_command.copyBuffer(buffer.Handle(), m_oob_download->Handle(),
+	                         static_cast<uint32_t>(copies.size()), copies.data());
+	auto after          = before;
+	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask = vk::AccessFlagBits::eHostRead;
+	after.buffer        = m_oob_download->Handle();
+	after.offset        = 0;
+	after.size          = total_size;
+	m_oob_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+	                              vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1, &after, 0,
+	                              nullptr);
+	EXIT_NOT_IMPLEMENTED(m_oob_command.end() != vk::Result::eSuccess);
+
+	vk::SubmitInfo submit {};
+	submit.commandBufferCount = 1;
+	submit.pCommandBuffers    = &m_oob_command;
+	{
+		Common::LockGuard lock(m_graphics.queue_mutex);
+		const auto        result = m_graphics.queue.submit(1, &submit, m_oob_fence);
+		if (result != vk::Result::eSuccess) {
+			EXIT("out-of-band download submit failed: %s\n", vk::to_string(result).c_str());
+		}
+	}
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
+	{
+		Libs::Graphics::GpuWaitTag wait_tag_("buffer-download-oob");
+		const auto start_time = std::chrono::steady_clock::now();
+		EXIT_NOT_IMPLEMENTED(device.waitForFences(1, &m_oob_fence, VK_TRUE, UINT64_MAX) !=
+		                     vk::Result::eSuccess);
+		Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuWaits);
+		Common::DebugCounters::Add(
+		    Common::DebugCounters::Counter::GpuWaitNs,
+		    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                              std::chrono::steady_clock::now() - start_time)
+		                              .count()));
+	}
+	EXIT_NOT_IMPLEMENTED(device.resetFences(1, &m_oob_fence) != vk::Result::eSuccess);
+	m_oob_download->Invalidate(0, total_size);
+	const auto* mapped = m_oob_download->Mapped().data();
+	for (const auto& copy: copies) {
+		Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
+		                                      mapped + copy.dstOffset, copy.size);
+	}
+	downloaded = true;
+	return true;
+}
+
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
 	if (vaddr == 0) {
 		return NULL_BUFFER_ID;
@@ -617,6 +772,8 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 	SetVulkanObjectNameF(m_graphics.device, buffer.Handle(),
 	                     "Kyty.GameBuffer[guest=0x{:016x} size=0x{:x}]", overlap.begin,
 	                     overlap.end - overlap.begin);
+	// Joined contents are copied in this batch.
+	NoteBatchWrite(overlap.begin, overlap.end - overlap.begin);
 	for (auto it = overlap.first; it != overlap.last;) {
 		const auto old_id = (it++)->second;
 		JoinOverlap(id, old_id, !overlap.has_stream_leap);
@@ -717,6 +874,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_write_epoch++;
+		NoteBatchWrite(vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);
 		ForgetColorMetadataChecks(vaddr, size);
 	}
