@@ -5,6 +5,8 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <algorithm>
+#include <unordered_set>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 
@@ -38,6 +40,18 @@ uint32_t SplitWaveThreads(ShaderStageInputInfo input_info) {
 	       std::max(cs.threads_num[2], 1u);
 }
 
+// One line per multi-wave compute shader: whether it splits, or what stops it.
+void ReportSplit(const IR::Program& program, uint32_t threads, const char* outcome) {
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> seen;
+	std::scoped_lock                    lock(mutex);
+	if (threads > 64u && seen.insert(program.shader_hash).second) {
+		std::printf("split wave64: shader 0x%016llx threads=%u: %s
+",
+		            static_cast<unsigned long long>(program.shader_hash), threads, outcome);
+	}
+}
+
 bool CanSplitWave(const IR::Program& program, ShaderStageInputInfo input_info) {
 	if (program.stage != ShaderType::Compute || !input_info.compute->split_wave64) {
 		return false;
@@ -50,20 +64,21 @@ bool CanSplitWave(const IR::Program& program, ShaderStageInputInfo input_info) {
 	    (waves > 1u && !SplitMultiWaveEnabled()) || program.info.compute_derivatives ||
 	    program.info.shared_int64_atomics || program.info.uses_swizzle ||
 	    cs.lds_size_dwords * 4u + threads * 4u + waves * 8u + 256u > 48u * 1024u) {
+		ReportSplit(program, threads, "no (workgroup, derivatives, int64 LDS atomics, swizzle or LDS size)");
 		return false;
 	}
 	for (const auto* block: program.blocks) {
 		for (const auto& inst: *block) {
 			switch (inst.GetOpcode()) {
-				case IR::ValueOpcode::DppMoveU32:
-				case IR::ValueOpcode::DppUpdateU32:
 				case IR::ValueOpcode::LiveMask:
 				case IR::ValueOpcode::Permlane16U32:
 				case IR::ValueOpcode::PermuteU32:
 				case IR::ValueOpcode::BpermuteU32:
 				case IR::ValueOpcode::DataAppend:
 				case IR::ValueOpcode::DataConsume:
-				case IR::ValueOpcode::SwizzleU32: return false;
+				case IR::ValueOpcode::SwizzleU32:
+					ReportSplit(program, threads, "no (cross-lane opcode)");
+					return false;
 				default: break;
 			}
 		}
@@ -101,6 +116,7 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 		state.lane_count  = 1u;
 		state.split_wave  = true;
 		state.split_waves = SplitWaveThreads(input_info) / 64u;
+		ReportSplit(program, SplitWaveThreads(input_info), "yes");
 	}
 	DefineModule(state);
 	EmitProgram(state);

@@ -821,7 +821,7 @@ void DefineModule(EmitterState& state) {
 	if (state.split_wave || state.program.info.subgroup_vote) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformVote);
 	}
-	if (state.program.info.subgroup_shuffle) {
+	if (state.split_wave || state.program.info.subgroup_shuffle) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniformShuffle);
 	}
 	if (state.program.info.subgroup_arithmetic) {

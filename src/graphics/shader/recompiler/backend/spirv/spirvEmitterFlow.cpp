@@ -120,7 +120,8 @@ uint32_t EmitSourceLaneActive(ValueEmitContext& ctx, uint32_t exec, uint32_t lan
 	auto&      state  = ctx.state;
 	const auto scope  = ConstantU32(state, spv::ScopeSubgroup);
 	const auto ballot = EmitNative<spv::OpGroupNonUniformBallot, IR::Type::U32x4>(state, scope, exec);
-	if (ctx.half != 0) {
+	// Split waves: DPP sources share the 16-lane row, so they are in the caller's host subgroup.
+	if (ctx.half != 0 || state.split_wave) {
 		lane = EmitAndConstant(state, lane, 31);
 	}
 	return EmitNative<spv::OpGroupNonUniformBallotBitExtract, IR::Type::U1>(state, scope, ballot,
@@ -787,6 +788,22 @@ uint32_t EmitDppMoveU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state    = ctx.state;
 	const auto flags    = inst.Flags<IR::DppMoveFlags>();
 	const auto target   = EmitDppTargetLane(state, flags);
+	if (state.split_wave) {
+		// DPP16 never leaves a 16-lane row, so a split wave's source is in the same host
+		// subgroup: shuffle natively instead of through the wave exchange.
+		const auto scope    = ConstantU32(state, spv::ScopeSubgroup);
+		const auto host     = EmitAndConstant(state, target.lane, 31u);
+		const auto shuffled = EmitNative<spv::OpGroupNonUniformShuffle, IR::Type::U32>(
+		    state, scope, ctx.Arg(inst, 0), host);
+		if (flags.fetch_inactive) {
+			return shuffled;
+		}
+		const auto active    = EmitSourceLaneActive(ctx, ctx.Arg(inst, 1), target.lane);
+		const auto can_fetch = Binary(state, spv::OpLogicalAnd, TypeBool(state), target.valid,
+		                              active);
+		return EmitNative<spv::OpSelect, IR::Type::U32>(state, can_fetch, shuffled,
+		                                                ConstantU32(state, 0));
+	}
 	const auto shuffled = ctx.Shuffle(inst, 0, target.lane);
 	if (flags.fetch_inactive) {
 		return shuffled;
