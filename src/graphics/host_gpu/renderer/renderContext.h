@@ -63,6 +63,13 @@ public:
 	void               SyncBda();
 	// The command processor stored to guest memory: the next BDA reader syncs first.
 	void               RequestBdaSync() { m_bda_sync_requested = true; }
+	// Before any draw or dispatch binds memory: command-processor stores made earlier in this
+	// command buffer must reach the GPU copies.
+	void               SyncBdaIfRequested() {
+		if (m_bda_sync_requested) {
+			SyncBda();
+		}
+	}
 	void               RunGarbageCollector();
 
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);

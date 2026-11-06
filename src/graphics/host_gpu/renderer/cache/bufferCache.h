@@ -87,6 +87,8 @@ public:
 	[[nodiscard]] bool IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const;
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
+	// A guest command buffer starts: CPU writes queued before now have been uploaded.
+	void               BeginCommandEpoch() { m_command_epoch++; }
 	// Like SynchronizeBuffersInRange for many ranges, with one upload per buffer.
 	void               SynchronizeBuffersInRanges(std::span<const std::pair<uint64_t, uint64_t>> ranges);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
@@ -162,6 +164,7 @@ private:
 	// Download-window start -> remaining prefetch credit.
 	std::map<uint64_t, uint32_t>                      m_readback_hot;
 	RangeSet                                          m_batch_writes;
+	uint64_t                                          m_command_epoch = 1;
 	uint64_t                                          m_batch_writes_tick = 0;
 	vk::CommandPool                                   m_oob_pool    = nullptr;
 	vk::CommandBuffer                                 m_oob_command = nullptr;

@@ -774,6 +774,7 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 	                     overlap.end - overlap.begin);
 	// Joined contents are copied in this batch.
 	NoteBatchWrite(overlap.begin, overlap.end - overlap.begin);
+	m_slot_buffers[id].created_epoch = m_command_epoch;
 	for (auto it = overlap.first; it != overlap.last;) {
 		const auto old_id = (it++)->second;
 		JoinOverlap(id, old_id, !overlap.has_stream_leap);
@@ -846,6 +847,19 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	return source.first->Handle();
 }
 
+namespace {
+
+bool DeferBindUploadsEnabled() {
+	// On by default; KYTY_UPLOAD_ON_BIND=1 uploads every CPU-modified page a draw binds.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_UPLOAD_ON_BIND");
+		return value == nullptr || value[0] != '1';
+	}();
+	return enabled;
+}
+
+} // namespace
+
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size,
                                                        bool is_written, bool is_texel_buffer,
                                                        BufferId id) {
@@ -871,6 +885,35 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	}
 	auto& buffer = m_slot_buffers[id];
 	TouchBuffer(buffer);
+	if (!is_written && !is_texel_buffer && buffer.created_epoch < m_command_epoch &&
+	    DeferBindUploadsEnabled()) {
+		// Pages the guest wrote after this command buffer started hold data for later work
+		// (the guest writes before it submits); they upload when the next command buffer
+		// starts. Uploading them here ended the render pass for a few pages per draw.
+		std::vector<std::pair<uint64_t, uint64_t>> pending;
+		{
+			std::lock_guard lock(m_bda_sync_mutex);
+			m_bda_sync.ForEachInRange(vaddr, size, [&](uint64_t start, uint64_t end) {
+				pending.emplace_back(start, end);
+			});
+		}
+		if (!pending.empty()) {
+			const auto end    = vaddr + size;
+			auto       cursor = vaddr;
+			for (auto [start, finish]: pending) {
+				start  = std::max(start, vaddr);
+				finish = std::min(finish, end);
+				if (start > cursor) {
+					(void)SynchronizeBuffer(buffer, cursor, start - cursor, false, false);
+				}
+				cursor = std::max(cursor, finish);
+			}
+			if (cursor < end) {
+				(void)SynchronizeBuffer(buffer, cursor, end - cursor, false, false);
+			}
+			return {&buffer, buffer.Offset(vaddr)};
+		}
+	}
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_write_epoch++;

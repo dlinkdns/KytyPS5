@@ -755,6 +755,7 @@ static void TraceUnboundedWrite(uint64_t shader, uint64_t address, uint64_t size
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 	KYTY_PROFILER_FUNCTION();
+	m_context.SyncBdaIfRequested();
 	auto& cache = m_context.GetBufferCache();
 	for (auto* stage: stages) {
 		auto&       prepared = *stage;

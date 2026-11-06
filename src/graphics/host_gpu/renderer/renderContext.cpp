@@ -155,6 +155,7 @@ void RenderContext::PrepareBda() {
 
 void RenderContext::SyncBda() {
 	m_bda_sync_requested = false;
+	m_buffer_cache.BeginCommandEpoch();
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	// One upload per buffer: separate uploads each ended the render pass and added barriers.
 	std::vector<std::pair<uint64_t, uint64_t>> ranges;
