@@ -967,6 +967,10 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 }
 
 void BufferCache::NoteCpuWrite(uint64_t vaddr, uint64_t size) {
+	// Without sticky pages every tracked page is write-protected, so the store faulted already.
+	if (!RegionManager::StickyEnabled()) {
+		return;
+	}
 	if (!GuestRange {vaddr, size}.Valid() || m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
 		// GPU-owned pages are protected, so the store itself faulted.
 		return;
@@ -1095,6 +1099,73 @@ void BufferCache::QueueBdaSync(uint64_t vaddr, uint64_t size) {
 RangeSet BufferCache::TakeBdaSync() {
 	std::lock_guard lock(m_bda_sync_mutex);
 	return std::exchange(m_bda_sync, {});
+}
+
+void BufferCache::SynchronizeBuffersInRanges(
+    std::span<const std::pair<uint64_t, uint64_t>> ranges) {
+	// Group the ranges by buffer, keeping the buffers in address order.
+	std::map<uint64_t, std::pair<BufferId, std::vector<std::pair<uint64_t, uint64_t>>>> groups;
+	for (const auto& [vaddr, size]: ranges) {
+		const auto end = vaddr + size;
+		auto       it  = m_buffers.upper_bound(vaddr);
+		if (it != m_buffers.begin()) {
+			--it;
+		}
+		for (; it != m_buffers.end() && it->first < end; ++it) {
+			auto&      buffer = m_slot_buffers[it->second];
+			const auto start  = std::max(buffer.CpuAddress(), vaddr);
+			const auto finish = std::min(buffer.CpuAddress() + buffer.Size(), end);
+			if (start < finish) {
+				auto& group = groups[it->first];
+				group.first = it->second;
+				group.second.emplace_back(start, finish - start);
+			}
+		}
+	}
+	std::vector<vk::BufferCopy> copies;
+	for (auto& [address, group]: groups) {
+		(void)address;
+		auto& buffer = m_slot_buffers[group.first];
+		copies.clear();
+		uint64_t total_size = 0;
+		for (const auto& [start, size]: group.second) {
+			m_memory_tracker.ForEachUploadRange(
+			    start, size, false,
+			    [&](uint64_t range_address, uint64_t bytes) noexcept {
+				    copies.emplace_back(total_size, buffer.Offset(range_address), bytes);
+				    total_size += bytes;
+			    },
+			    []() noexcept {});
+		}
+		const auto source = UploadCopies(buffer, copies, total_size);
+		if (!source) {
+			continue;
+		}
+		auto& command = m_scheduler.Current();
+		command.EndRendering();
+		const auto              native = command.Handle();
+		vk::BufferMemoryBarrier before {};
+		before.srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite |
+		                       vk::AccessFlagBits::eTransferRead |
+		                       vk::AccessFlagBits::eTransferWrite;
+		before.dstAccessMask       = vk::AccessFlagBits::eTransferWrite;
+		before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		before.buffer              = buffer.Handle();
+		before.offset              = 0;
+		before.size                = buffer.Size();
+		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                       vk::PipelineStageFlagBits::eTransfer,
+		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
+		native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()),
+		                  copies.data());
+		auto after          = before;
+		after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		after.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+		native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+		                       vk::PipelineStageFlagBits::eAllCommands,
+		                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
+	}
 }
 
 void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {

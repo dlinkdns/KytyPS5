@@ -130,11 +130,17 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 
 void RenderContext::PrepareBda() {
 	std::shared_lock lock(m_mapped_ranges_mutex);
-	m_buffer_cache.TakeBdaSync().ForEach([this](uint64_t begin, uint64_t end) {
-		m_mapped_ranges.ForEachInRange(begin, end - begin, [this](uint64_t start, uint64_t finish) {
-			m_buffer_cache.SynchronizeBuffersInRange(start, finish - start);
-		});
+	// One upload per buffer: separate uploads each ended the render pass and added barriers.
+	std::vector<std::pair<uint64_t, uint64_t>> ranges;
+	m_buffer_cache.TakeBdaSync().ForEach([this, &ranges](uint64_t begin, uint64_t end) {
+		m_mapped_ranges.ForEachInRange(begin, end - begin,
+		                               [&ranges](uint64_t start, uint64_t finish) {
+			                               ranges.emplace_back(start, finish - start);
+		                               });
 	});
+	if (!ranges.empty()) {
+		m_buffer_cache.SynchronizeBuffersInRanges(ranges);
+	}
 	m_fault_process_pending = true;
 }
 

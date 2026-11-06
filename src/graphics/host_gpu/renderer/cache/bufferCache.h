@@ -87,6 +87,8 @@ public:
 	[[nodiscard]] bool IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const;
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
+	// Like SynchronizeBuffersInRange for many ranges, with one upload per buffer.
+	void               SynchronizeBuffersInRanges(std::span<const std::pair<uint64_t, uint64_t>> ranges);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
 	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] RangeSet TakeBdaSync();
