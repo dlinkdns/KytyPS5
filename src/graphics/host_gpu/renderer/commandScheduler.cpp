@@ -336,6 +336,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		submit_info.pSignalSemaphores    = submit.signal_semaphores.data();
 
 		result = graphics.queue.submit(1, &submit_info, nullptr);
+		// Its queue wait needs the queue lock: other threads submit and present on this queue.
+		if (result == vk::Result::eSuccess) {
+			GpuCheckpoints::Profile::Flush(graphics.queue);
+		}
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 
@@ -345,7 +349,6 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 
 	m_command.m_buffer = nullptr;
-	GpuCheckpoints::Profile::Flush(graphics.queue);
 	return tick;
 }
 
