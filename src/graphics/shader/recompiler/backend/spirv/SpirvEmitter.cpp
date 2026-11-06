@@ -46,8 +46,7 @@ void ReportSplit(const IR::Program& program, uint32_t threads, const char* outco
 	static std::unordered_set<uint64_t> seen;
 	std::scoped_lock                    lock(mutex);
 	if (threads > 64u && seen.insert(program.shader_hash).second) {
-		std::printf("split wave64: shader 0x%016llx threads=%u: %s
-",
+		std::printf("split wave64: shader 0x%016llx threads=%u: %s\n",
 		            static_cast<unsigned long long>(program.shader_hash), threads, outcome);
 	}
 }
