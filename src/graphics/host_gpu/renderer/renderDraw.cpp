@@ -1,4 +1,6 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
+#include "graphics/host_gpu/renderer/drawTrace.h"
+#include <optional>
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -1093,20 +1095,27 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 4> descriptor_stages {};
 	uint32_t                         stage_count = 0;
-	for (uint32_t i = 0; i < vertex_stages.size(); i++) {
-		PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
-		descriptor_stages[stage_count++] = &bindings.vertex[i];
-	}
-	if (state.ps_active) {
-		PrepareBindings(state.ps_input_info.stage, bindings.pixel);
-		descriptor_stages[stage_count++] = &bindings.pixel;
+	{
+		DrawTrace::Scope trace_(DrawTrace::StageBindings);
+		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
+			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
+			descriptor_stages[stage_count++] = &bindings.vertex[i];
+		}
+		if (state.ps_active) {
+			PrepareBindings(state.ps_input_info.stage, bindings.pixel);
+			descriptor_stages[stage_count++] = &bindings.pixel;
+		}
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
-	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	{
+		DrawTrace::Scope trace_(DrawTrace::GraphicsBindings);
+		PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	}
 	GpuCheckpoints::Mark(buffer.Handle(), 13, 1);
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
+		DrawTrace::Scope trace_(DrawTrace::VertexIndex);
 		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
 		index_binding   = PrepareIndexBuffer(buffer, index_source);
 	}
@@ -1119,11 +1128,17 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		EXIT_IF((args_buffer.second & 3u) != 0);
 	}
 	GpuCheckpoints::Mark(buffer.Handle(), 13, 2);
+	std::optional<DrawTrace::Scope> pipeline_trace_;
+	pipeline_trace_.emplace(DrawTrace::Pipeline);
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
+	pipeline_trace_.reset();
 	vk::ImageAspectFlags feedback_aspects;
+	std::optional<DrawTrace::Scope> targets_trace_;
+	targets_trace_.emplace(DrawTrace::RenderTargets);
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         feedback_aspects, stages);
+	targets_trace_.reset();
 	GpuCheckpoints::Mark(buffer.Handle(), 13, 3, state.depth_info.image_id ? 1 : 0,
 	                     state.color_count);
 	vk::DeviceAddress task_params = 0;
@@ -1148,6 +1163,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
 	auto vk_buffer = buffer.Handle();
+	std::optional<DrawTrace::Scope> commit_trace_;
+	commit_trace_.emplace(DrawTrace::Commit);
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
@@ -1188,6 +1205,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	                           rendering);
 	dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
 	dynamic_state.Commit(m_context.GetGraphics(), vk_buffer);
+	commit_trace_.reset();
+	DrawTrace::Scope record_trace_(DrawTrace::Record);
 
 	vk::PipelineStageFlags shader_write_stages = {};
 	for (const auto& stage: vertex_stages) {
@@ -1272,6 +1291,7 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 
 bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args) {
 	KYTY_PROFILER_FUNCTION();
+	DrawTrace::Scope total_trace_(DrawTrace::Total);
 
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
@@ -1347,10 +1367,13 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	}
 
 	const DrawCallInfo draw {true, args.index_count, args.instance_count};
+	std::optional<DrawTrace::Scope> state_trace_;
+	state_trace_.emplace(DrawTrace::RenderState);
 	if (!PrepareDrawRenderState(buffer, draw, state)) {
 		ResetBindings();
 		return true;
 	}
+	state_trace_.reset();
 	GpuCheckpoints::Mark(buffer.Handle(), 12, state.vertex_info[0].stage.module->info.shader_hash,
 	                     state.ps_active ? state.ps_input_info.stage.module->info.shader_hash : 0);
 
@@ -1368,6 +1391,7 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	KYTY_PROFILER_FUNCTION();
+	DrawTrace::Scope total_trace_(DrawTrace::Total);
 
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
