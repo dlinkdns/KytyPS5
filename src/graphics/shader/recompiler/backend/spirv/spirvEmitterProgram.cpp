@@ -9,6 +9,7 @@
 #include <optional>
 #include <type_traits>
 #include <unordered_set>
+#include <string_view>
 #include <utility>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
@@ -292,12 +293,35 @@ void EmitDispatcherInstruction(ValueEmitContext& ctx, const DispatcherFunctionSt
 	}
 }
 
+// Split waves: 0 = no LDS access, 1 = read, 2 = write, 3 = atomic.
+uint32_t SplitWaveLdsAccess(IR::ValueOpcode op) {
+	const std::string_view name = IR::ValueOpcodeName(op);
+	if (name.starts_with("LoadShared")) return 1;
+	if (name.starts_with("WriteShared")) return 2;
+	if (name.starts_with("SharedAtomic")) return 3;
+	return 0;
+}
+
 template <typename EmitInstruction>
 void EmitBlock(ValueEmitContext& ctx, const IR::Block* block, EmitInstruction&& emit_instruction) {
 	ctx.state.current_block = block;
 	EmitLabel(ctx.state, block->Definition());
 	bool emitted_non_phi = false;
+	// A wave's lanes run in lockstep on the guest, so its code can read LDS that other lanes just
+	// wrote without S_BARRIER. Split waves are two host subgroups that do not, so order every
+	// change between LDS reads, writes and atomics with a workgroup barrier (the workgroup is
+	// exactly this wave, and its control flow is wave-uniform).
+	uint32_t lds_last = 0;
 	for (const auto& inst: *block) {
+		if (ctx.state.split_wave) {
+			const auto access = SplitWaveLdsAccess(inst.GetOpcode());
+			if (access != 0 && access != lds_last) {
+				EmitSplitWaveBarrier(ctx.state);
+			}
+			if (access != 0) {
+				lds_last = access;
+			}
+		}
 		if (inst.GetOpcode() == IR::ValueOpcode::Phi) {
 			if (emitted_non_phi) {
 				ctx.Fail(inst, "appears after a non-Phi instruction");
@@ -472,8 +496,6 @@ uint32_t ValueEmitContext::HalfArg(const IR::Inst& inst, size_t index, uint32_t 
 	return lane_half == half ? Arg(inst, index) : other_half->Arg(inst, index);
 }
 
-namespace {
-
 void EmitSplitWaveBarrier(EmitterState& state) {
 	state.builder.AddFunction(
 	    spv::OpControlBarrier, ConstantU32(state, spv::ScopeWorkgroup),
@@ -481,6 +503,8 @@ void EmitSplitWaveBarrier(EmitterState& state) {
 	    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask |
 	                           spv::MemorySemanticsWorkgroupMemoryMask));
 }
+
+namespace {
 
 uint32_t SplitWaveSlot(EmitterState& state, uint32_t lane) {
 	const auto pointer = state.builder.AllocateId();

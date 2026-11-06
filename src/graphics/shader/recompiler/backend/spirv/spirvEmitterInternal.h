@@ -324,6 +324,8 @@ uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
 // Split waves: publishes each invocation's word, then returns the words of lanes 0 and 32 (one
 // per host subgroup). Needs control flow that is uniform across the wave.
 std::pair<uint32_t, uint32_t> EmitSplitWaveExchangeHalves(EmitterState& state, uint32_t word);
+// Split waves: a workgroup barrier ordering shared memory between the wave's host subgroups.
+void EmitSplitWaveBarrier(EmitterState& state);
 // Split waves: reads a u32 from another lane of the 64-lane wave.
 uint32_t EmitSplitWaveReadLane(EmitterState& state, uint32_t value, uint32_t lane);
 
