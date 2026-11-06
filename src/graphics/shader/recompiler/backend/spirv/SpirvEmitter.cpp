@@ -62,7 +62,8 @@ bool CanSplitWave(const IR::Program& program, ShaderStageInputInfo input_info) {
 	if (threads % 64u != 0u || waves == 0u || waves > 16u ||
 	    (waves > 1u && !SplitMultiWaveEnabled()) || program.info.compute_derivatives ||
 	    program.info.shared_int64_atomics || program.info.uses_swizzle ||
-	    cs.lds_size_dwords * 4u + threads * 4u + waves * 8u + 256u > 48u * 1024u) {
+	    (cs.lds_storage ? 0u : cs.lds_size_dwords * 4u) + threads * 4u + waves * 8u + 256u >
+	        48u * 1024u) {
 		ReportSplit(program, threads, "no (workgroup, derivatives, int64 LDS atomics, swizzle or LDS size)");
 		return false;
 	}

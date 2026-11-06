@@ -513,7 +513,11 @@ void EmitPairSync(EmitterState& state) {
 	const auto u         = TypeU32(state);
 	const auto b         = TypeBool(state);
 	const auto workgroup = ConstantU32(state, spv::ScopeWorkgroup);
-	const auto memory    = spv::MemorySemanticsWorkgroupMemoryMask;
+	// LDS lives in a storage buffer when it exceeds the host's shared memory.
+	const auto memory    = state.lds_storage_class == spv::StorageClassStorageBuffer
+	                           ? spv::MemorySemanticsWorkgroupMemoryMask |
+	                                 spv::MemorySemanticsUniformMemoryMask
+	                           : spv::MemorySemanticsWorkgroupMemoryMask;
 	const auto gen       = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, u, gen, state.pair_gen_variable);
 	const auto next = Binary(state, spv::OpIAdd, u, gen, ConstantU32(state, 1u));
@@ -551,11 +555,13 @@ void EmitSplitWaveBarrier(EmitterState& state) {
 		EmitPairSync(state);
 		return;
 	}
+	const auto lds_buffer = state.lds_storage_class == spv::StorageClassStorageBuffer;
 	state.builder.AddFunction(
 	    spv::OpControlBarrier, ConstantU32(state, spv::ScopeWorkgroup),
 	    ConstantU32(state, spv::ScopeWorkgroup),
 	    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask |
-	                           spv::MemorySemanticsWorkgroupMemoryMask));
+	                           spv::MemorySemanticsWorkgroupMemoryMask |
+	                           (lds_buffer ? spv::MemorySemanticsUniformMemoryMask : 0u)));
 }
 
 void EmitSplitWavePrologue(EmitterState& state) {
