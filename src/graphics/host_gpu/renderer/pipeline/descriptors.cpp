@@ -746,8 +746,7 @@ static void TraceUnboundedWrite(uint64_t shader, uint64_t address, uint64_t size
 	}
 	static std::unordered_set<uint64_t> seen;
 	if (seen.size() < 4096 && seen.insert(shader ^ (address * 0x9e3779b97f4a7c15ull)).second) {
-		std::printf("unbounded writable buffer: shader=0x%016llx addr=0x%010llx size=0x%llx
-",
+		std::printf("unbounded writable buffer: shader=0x%016llx addr=0x%010llx size=0x%llx\n",
 		            static_cast<unsigned long long>(shader), static_cast<unsigned long long>(address),
 		            static_cast<unsigned long long>(size));
 	}
