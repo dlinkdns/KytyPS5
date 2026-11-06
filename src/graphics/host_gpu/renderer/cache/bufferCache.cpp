@@ -478,9 +478,12 @@ bool BufferCache::WaitPrefetchedDownloads(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::PrefetchReadbacks() {
-	if (m_readback_hot.empty() || !ReadbackPrefetchEnabled()) {
+	// Hot windows only gain GPU-written bytes through ObtainBuffer; skip when there was none.
+	if (m_readback_hot.empty() || m_gpu_write_epoch == m_prefetch_epoch ||
+	    !ReadbackPrefetchEnabled()) {
 		return;
 	}
+	m_prefetch_epoch = m_gpu_write_epoch;
 	for (auto it = m_readback_hot.begin(); it != m_readback_hot.end();) {
 		const auto  key   = it->first;
 		const auto* owner = m_page_table.Find(key >> PageTable::kPageBits);
@@ -713,6 +716,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		m_gpu_write_epoch++;
 		m_gpu_modified_ranges.Add(vaddr, size);
 		ForgetColorMetadataChecks(vaddr, size);
 	}

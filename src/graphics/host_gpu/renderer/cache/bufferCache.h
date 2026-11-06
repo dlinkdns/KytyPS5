@@ -144,6 +144,8 @@ private:
 	std::vector<PrefetchedDownload>                   m_prefetched_downloads;
 	// Download-window start -> remaining prefetch credit.
 	std::map<uint64_t, uint32_t>                      m_readback_hot;
+	uint64_t                                          m_gpu_write_epoch = 0;
+	uint64_t                                          m_prefetch_epoch  = 0;
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
