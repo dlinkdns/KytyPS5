@@ -91,6 +91,11 @@ public:
 	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] RangeSet TakeBdaSync();
 	void               RunGarbageCollector();
+	// At a guest sync point, queues asynchronous downloads of GPU-written windows that guest CPU
+	// accesses recently had to download synchronously, so the next access needs no GPU wait.
+	void               PrefetchReadbacks();
+	// True while a prefetched download over the range is not yet known to be published.
+	[[nodiscard]] bool HasPendingPrefetch(uint64_t vaddr, uint64_t size) const;
 
 private:
 	friend struct BufferCacheTestAccess;
@@ -127,6 +132,18 @@ private:
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
+	// Waits for prefetched downloads over the range to publish; returns whether any did.
+	bool               WaitPrefetchedDownloads(uint64_t vaddr, uint64_t size);
+	void               NoteReadbackFault(uint64_t vaddr, bool prefetch_hit);
+
+	struct PrefetchedDownload {
+		uint64_t begin;
+		uint64_t end;
+		uint64_t tick;
+	};
+	std::vector<PrefetchedDownload>                   m_prefetched_downloads;
+	// Download-window start -> remaining prefetch credit.
+	std::map<uint64_t, uint32_t>                      m_readback_hot;
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;

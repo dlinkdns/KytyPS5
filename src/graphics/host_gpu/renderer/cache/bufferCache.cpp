@@ -281,6 +281,10 @@ BufferCache::~BufferCache() {
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
+	// Prefetched windows leave their pages marked until a guest access; nothing is left to download.
+	for (const auto& d: m_prefetched_downloads) {
+		m_memory_tracker.UnmarkRegionAsGpuModified(d.begin, d.end - d.begin);
+	}
 	for (const auto& [vaddr, id]: m_buffers) {
 		(void)vaddr;
 		const auto& buffer = m_slot_buffers[id];
@@ -305,6 +309,7 @@ struct ReadbackTrace {
 		uint64_t reads     = 0;
 		uint64_t writes    = 0;
 		uint64_t downloads = 0;
+		uint64_t prefetch_hits = 0;
 		uint64_t bytes     = 0;
 		uint64_t min_size  = UINT64_MAX;
 		uint64_t max_size  = 0;
@@ -322,11 +327,15 @@ bool ReadbackTraceEnabled() {
 	return enabled;
 }
 
-void TraceReadback(uint64_t vaddr, uint64_t size, bool is_write, uint64_t downloaded) {
+void TraceReadback(uint64_t vaddr, uint64_t size, bool is_write, uint64_t downloaded,
+                   bool prefetch_hit) {
 	static ReadbackTrace trace;
 	std::scoped_lock lock {trace.mutex};
 	auto& entry = trace.regions[vaddr >> 16u];
 	(is_write ? entry.writes : entry.reads)++;
+	if (prefetch_hit) {
+		entry.prefetch_hits++;
+	}
 	if (downloaded != 0) {
 		entry.downloads++;
 		entry.bytes += downloaded;
@@ -346,10 +355,11 @@ void TraceReadback(uint64_t vaddr, uint64_t size, bool is_write, uint64_t downlo
 	std::printf("--- GPU readbacks over %.1f s (%zu regions) ---\n", seconds, top.size());
 	for (size_t i = 0; i < top.size() && i < 12; i++) {
 		const auto& [region, e] = top[i];
-		std::printf("  0x%010llx  reads %6.1f/s  writes %6.1f/s  downloads %6.1f/s  %8.1f KB/s"
-		            "  req %llu..%llu B\n",
+		std::printf("  0x%010llx  reads %6.1f/s  writes %6.1f/s  downloads %6.1f/s"
+		            "  prefetch-hits %6.1f/s  %8.1f KB/s  req %llu..%llu B\n",
 		            static_cast<unsigned long long>(region << 16u), e.reads / seconds,
-		            e.writes / seconds, e.downloads / seconds, e.bytes / seconds / 1024.0,
+		            e.writes / seconds, e.downloads / seconds, e.prefetch_hits / seconds,
+		            e.bytes / seconds / 1024.0,
 		            static_cast<unsigned long long>(e.min_size),
 		            static_cast<unsigned long long>(e.max_size));
 	}
@@ -376,20 +386,138 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			    std::max(Common::AlignDown(vaddr, DownloadWindowSize), buffer.CpuAddress());
 			const auto end = std::min(std::max(start + DownloadWindowSize, vaddr + size),
 			                          buffer.CpuAddress() + buffer.Size());
-			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
+			// A prefetch took its bytes out of the dirty ranges; they reach guest memory when it
+			// publishes, which is usually already done.
+			const bool prefetched = WaitPrefetchedDownloads(start, end - start);
+			const bool downloaded = DownloadBufferMemory<false>(buffer, start, end - start);
+			// With no GPU-written bytes left in the window, its pages may lose GPU ownership.
+			if (downloaded || !m_gpu_modified_ranges.Intersects(start, end - start)) {
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 			}
+			NoteReadbackFault(vaddr, prefetched && !downloaded);
 			if (ReadbackTraceEnabled()) {
-				TraceReadback(vaddr, size, is_write, end - start);
+				TraceReadback(vaddr, size, is_write, downloaded ? end - start : 0,
+				              prefetched && !downloaded);
 			}
 		} else if (ReadbackTraceEnabled()) {
-			TraceReadback(vaddr, size, is_write, 0);
+			TraceReadback(vaddr, size, is_write, 0, false);
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 			QueueBdaSync(vaddr, size);
 		}
 	});
+}
+
+namespace {
+
+bool ReadbackPrefetchEnabled() {
+	// On by default; KYTY_PREFETCH_READBACKS=0 restores purely on-demand downloads.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_PREFETCH_READBACKS");
+		return value == nullptr || value[0] != '0';
+	}();
+	return enabled;
+}
+
+constexpr uint32_t ReadbackCreditOnMiss = 4;
+constexpr uint32_t ReadbackCreditOnHit  = 2;
+constexpr uint32_t ReadbackCreditMax    = 16;
+constexpr size_t   ReadbackHotLimit     = 64;
+
+} // namespace
+
+void BufferCache::NoteReadbackFault(uint64_t vaddr, bool prefetch_hit) {
+	if (!ReadbackPrefetchEnabled()) {
+		return;
+	}
+	const auto key = Common::AlignDown(vaddr, DownloadWindowSize);
+	auto       it  = m_readback_hot.find(key);
+	if (it == m_readback_hot.end()) {
+		if (m_readback_hot.size() >= ReadbackHotLimit) {
+			return;
+		}
+		it = m_readback_hot.emplace(key, 0u).first;
+	}
+	it->second =
+	    std::min(ReadbackCreditMax, it->second + (prefetch_hit ? ReadbackCreditOnHit
+	                                                           : ReadbackCreditOnMiss));
+}
+
+bool BufferCache::HasPendingPrefetch(uint64_t vaddr, uint64_t size) const {
+	const auto end = vaddr + size;
+	return std::any_of(m_prefetched_downloads.begin(), m_prefetched_downloads.end(),
+	                   [&](const PrefetchedDownload& d) { return d.begin < end && vaddr < d.end; });
+}
+
+bool BufferCache::WaitPrefetchedDownloads(uint64_t vaddr, uint64_t size) {
+	if (m_prefetched_downloads.empty()) {
+		return false;
+	}
+	const auto end  = vaddr + size;
+	uint64_t   tick = 0;
+	for (const auto& d: m_prefetched_downloads) {
+		if (d.begin < end && vaddr < d.end) {
+			tick = std::max(tick, d.tick);
+		}
+	}
+	if (tick == 0) {
+		return false;
+	}
+	{
+		Libs::Graphics::GpuWaitTag wait_tag_("buffer-prefetch-wait");
+		m_scheduler.Wait(tick);
+		m_scheduler.WaitPriorityOperations(tick);
+	}
+	// The caller clears the waited range; entries reaching outside it stay (already published, so a
+	// later wait on them is free) until an access covers them.
+	std::erase_if(m_prefetched_downloads, [&](const PrefetchedDownload& d) {
+		return d.tick <= tick && vaddr <= d.begin && d.end <= end;
+	});
+	return true;
+}
+
+void BufferCache::PrefetchReadbacks() {
+	if (m_readback_hot.empty() || !ReadbackPrefetchEnabled()) {
+		return;
+	}
+	for (auto it = m_readback_hot.begin(); it != m_readback_hot.end();) {
+		const auto  key   = it->first;
+		const auto* owner = m_page_table.Find(key >> PageTable::kPageBits);
+		BufferId    id {};
+		if (owner != nullptr && *owner) {
+			id = *owner;
+		} else {
+			// The window may begin before the buffer that faulted; look for it inside the window.
+			const auto next = m_buffers.lower_bound(key);
+			if (next != m_buffers.end() && next->first < key + DownloadWindowSize) {
+				id = next->second;
+			}
+		}
+		if (IsBufferInvalid(id)) {
+			it = m_readback_hot.erase(it);
+			continue;
+		}
+		auto&      buffer = m_slot_buffers[id];
+		const auto start  = std::max(key, buffer.CpuAddress());
+		const auto end    = std::min(key + DownloadWindowSize, buffer.CpuAddress() + buffer.Size());
+		if (start >= end || !m_gpu_modified_ranges.Intersects(start, end - start)) {
+			++it;
+			continue;
+		}
+		if (DownloadBufferMemory<true>(buffer, start, end - start)) {
+			// Publishes run in queue order, so the new entry also covers older ones for the window.
+			std::erase_if(m_prefetched_downloads, [&](const PrefetchedDownload& d) {
+				return start <= d.begin && d.end <= end;
+			});
+			m_prefetched_downloads.push_back({start, end, m_scheduler.CurrentTick()});
+		}
+		if (--it->second == 0) {
+			it = m_readback_hot.erase(it);
+		} else {
+			++it;
+		}
+	}
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
@@ -716,7 +844,7 @@ bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
-	return m_gpu_modified_ranges.Intersects(vaddr, size);
+	return m_gpu_modified_ranges.Intersects(vaddr, size) || HasPendingPrefetch(vaddr, size);
 }
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
@@ -742,9 +870,15 @@ void BufferCache::RunGarbageCollector() {
 		auto& buffer = m_slot_buffers[id];
 		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges, buffer.CpuAddress(),
 		                                           buffer.Size(), "garbage collection");
-		const bool dirty = m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size());
+		bool dirty = m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size());
 		if (dirty && !aggressive) {
 			return false;
+		}
+		if (dirty && WaitPrefetchedDownloads(buffer.CpuAddress(), buffer.Size()) &&
+		    !m_gpu_modified_ranges.Intersects(buffer.CpuAddress(), buffer.Size())) {
+			// A prefetch already published every GPU-written byte.
+			m_memory_tracker.UnmarkRegionAsGpuModified(buffer.CpuAddress(), buffer.Size());
+			dirty = false;
 		}
 		if (dirty) {
 			EXIT_NOT_IMPLEMENTED(!DownloadBufferMemory<true>(buffer, buffer.CpuAddress(), buffer.Size()));
