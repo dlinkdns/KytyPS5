@@ -15,8 +15,12 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
+#include <cstdlib>
+#include <cstring>
+#include <type_traits>
 
 namespace Libs::Graphics {
 
@@ -36,6 +40,15 @@ static bool DccAlphaOnMsb(const HW::ColorInfo& info) {
 	}
 	return components == 3 || info.channel_order == Prospero::ChannelOrder::kStandard ||
 	       info.channel_order == Prospero::ChannelOrder::kAlt;
+}
+
+static bool RenderTargetCacheEnabled() {
+	// On by default; KYTY_NO_RT_CACHE=1 decodes the color-target registers on every draw.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_NO_RT_CACHE");
+		return value == nullptr || value[0] != '1';
+	}();
+	return enabled;
 }
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
@@ -67,6 +80,30 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 
 		return;
 	}
+
+	// Consecutive draws nearly always keep their color targets. The decoded description depends
+	// only on the slot's registers and these arguments; the image lookup still runs every time.
+	using TargetRegisters = std::remove_cvref_t<decltype(rt)>;
+	struct CachedTarget {
+		bool            valid = false;
+		TargetRegisters registers {};
+		uint32_t        mask   = 0;
+		bool            ignore = false;
+		bool            exact  = false;
+		RenderColorInfo info;
+	};
+	static thread_local std::array<CachedTarget, 8> cache {};
+	auto&      cached        = cache[rt_slot & 7u];
+	const bool cache_enabled = RenderTargetCacheEnabled();
+	if (cache_enabled && cached.valid && cached.mask == mask &&
+	    cached.ignore == ignore_target_mask && cached.exact == exact_format &&
+	    std::memcmp(&cached.registers, &rt, sizeof(rt)) == 0) {
+		r          = cached.info;
+		r.image_id = m_context.GetTextureCache().FindImage(r.desc, exact_format);
+		BindRenderTarget(r.image_id);
+		return;
+	}
+
 	const auto samples = render_sample_count(rt.attrib.num_fragments);
 	// TODO(PPSA24156): Replace this 2x MSAA approximation with proper 4-coverage/2-fragment EQAA.
 	const bool approximate_eqaa = rt.attrib.num_samples == 2 && rt.attrib.num_fragments == 1;
@@ -257,8 +294,17 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	auto& texture_cache        = m_context.GetTextureCache();
 	r.guest_mip_level          = mip;
 	r.guest_array_layer        = view.base_layer;
-	r.image_id                 = texture_cache.FindImage(r.desc, exact_format);
 	r.export_mapping           = target_format.export_mapping;
+	if (cache_enabled) {
+		// Stored before FindImage, which can adjust the view to a containing image.
+		cached.valid = true;
+		std::memcpy(&cached.registers, &rt, sizeof(rt));
+		cached.mask   = mask;
+		cached.ignore = ignore_target_mask;
+		cached.exact  = exact_format;
+		cached.info   = r;
+	}
+	r.image_id = texture_cache.FindImage(r.desc, exact_format);
 	BindRenderTarget(r.image_id);
 }
 
