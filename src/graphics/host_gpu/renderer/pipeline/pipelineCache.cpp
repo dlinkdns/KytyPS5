@@ -891,8 +891,9 @@ const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo
                                                      ShaderComputeInputInfo&      input_info) {
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	static const bool split_wave64 = [] {
+		// On by default; KYTY_SPLIT_WAVE64=0 keeps two guest lanes per invocation.
 		const char* value = std::getenv("KYTY_SPLIT_WAVE64");
-		return value != nullptr && value[0] == '1';
+		return value == nullptr || value[0] != '0';
 	}();
 	input_info.split_wave64 = split_wave64 && input_info.host_subgroup_size == 32u;
 	const auto        params      = PrepareProgram(regs, input_info);

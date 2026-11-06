@@ -15,6 +15,11 @@
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <map>
+#include <mutex>
 #include <cinttypes>
 #include <cstring>
 #include <memory>
@@ -291,6 +296,70 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	QueueBdaSync(vaddr, size);
 }
 
+namespace {
+
+// KYTY_TRACE_READBACKS=1: every ~2 s, prints which 64 KiB regions forced synchronous
+// GPU-to-CPU downloads (guest CPU reads or writes of GPU-written memory).
+struct ReadbackTrace {
+	struct Entry {
+		uint64_t reads     = 0;
+		uint64_t writes    = 0;
+		uint64_t downloads = 0;
+		uint64_t bytes     = 0;
+		uint64_t min_size  = UINT64_MAX;
+		uint64_t max_size  = 0;
+	};
+	std::mutex                            mutex;
+	std::map<uint64_t, Entry>             regions;
+	std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
+};
+
+bool ReadbackTraceEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_TRACE_READBACKS");
+		return value != nullptr && value[0] == '1';
+	}();
+	return enabled;
+}
+
+void TraceReadback(uint64_t vaddr, uint64_t size, bool is_write, uint64_t downloaded) {
+	static ReadbackTrace trace;
+	std::scoped_lock lock {trace.mutex};
+	auto& entry = trace.regions[vaddr >> 16u];
+	(is_write ? entry.writes : entry.reads)++;
+	if (downloaded != 0) {
+		entry.downloads++;
+		entry.bytes += downloaded;
+	}
+	entry.min_size = std::min(entry.min_size, size);
+	entry.max_size = std::max(entry.max_size, size);
+	const auto now = std::chrono::steady_clock::now();
+	const double seconds = std::chrono::duration<double>(now - trace.last).count();
+	if (seconds < 2.0) {
+		return;
+	}
+	std::vector<std::pair<uint64_t, ReadbackTrace::Entry>> top(trace.regions.begin(),
+	                                                           trace.regions.end());
+	std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+		return a.second.reads + a.second.writes > b.second.reads + b.second.writes;
+	});
+	std::printf("--- GPU readbacks over %.1f s (%zu regions) ---\n", seconds, top.size());
+	for (size_t i = 0; i < top.size() && i < 12; i++) {
+		const auto& [region, e] = top[i];
+		std::printf("  0x%010llx  reads %6.1f/s  writes %6.1f/s  downloads %6.1f/s  %8.1f KB/s"
+		            "  req %llu..%llu B\n",
+		            static_cast<unsigned long long>(region << 16u), e.reads / seconds,
+		            e.writes / seconds, e.downloads / seconds, e.bytes / seconds / 1024.0,
+		            static_cast<unsigned long long>(e.min_size),
+		            static_cast<unsigned long long>(e.max_size));
+	}
+	std::fflush(stdout);
+	trace.regions.clear();
+	trace.last = now;
+}
+
+} // namespace
+
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
@@ -310,6 +379,11 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			if (DownloadBufferMemory<false>(buffer, start, end - start)) {
 				m_memory_tracker.UnmarkRegionAsGpuModified(start, end - start);
 			}
+			if (ReadbackTraceEnabled()) {
+				TraceReadback(vaddr, size, is_write, end - start);
+			}
+		} else if (ReadbackTraceEnabled()) {
+			TraceReadback(vaddr, size, is_write, 0);
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
