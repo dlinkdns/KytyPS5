@@ -1938,7 +1938,10 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
 	std::scoped_lock lock {m_lock};
-	for (const auto id: FindImagesInRegion(address, size)) {
+	// Only images starting at the address change; each of them overlaps its first byte, so
+	// looking at that byte avoids walking the owners of a range of up to hundreds of MiB.
+	(void)size;
+	for (const auto id: FindImagesInRegion(address, 1)) {
 		auto& image = m_slot_images[id];
 		if (image.info.data.address != address) {
 			continue;

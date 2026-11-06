@@ -1,4 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include <cstdio>
+#include <cstdlib>
+#include <unordered_set>
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -731,6 +734,25 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	}
 }
 
+// KYTY_TRACE_READBACKS=1: names each shader that binds a writable buffer with unbounded
+// NumRecords; its whole clamped range is marked GPU-written.
+static void TraceUnboundedWrite(uint64_t shader, uint64_t address, uint64_t size) {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_TRACE_READBACKS");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (!enabled) {
+		return;
+	}
+	static std::unordered_set<uint64_t> seen;
+	if (seen.size() < 4096 && seen.insert(shader ^ (address * 0x9e3779b97f4a7c15ull)).second) {
+		std::printf("unbounded writable buffer: shader=0x%016llx addr=0x%010llx size=0x%llx
+",
+		            static_cast<unsigned long long>(shader), static_cast<unsigned long long>(address),
+		            static_cast<unsigned long long>(size));
+	}
+}
+
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 	KYTY_PROFILER_FUNCTION();
 	auto& cache = m_context.GetBufferCache();
@@ -780,6 +802,9 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				    uint64_t {graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange} -
 				    (graphics.StorageMinAlignment() - 1);
 				size = std::min({size, uint64_t {256} * 1024 * 1024, limit});
+				if (program.info.buffers[resource].written) {
+					TraceUnboundedWrite(program.shader_hash, address, size);
+				}
 			}
 			// Finite GPU descriptors can span sparse PRT holes; clamp only oversized/sentinel ranges.
 			if (size >= (uint64_t {1} << 30u) || descriptor.NumRecords() == UINT32_MAX) {
