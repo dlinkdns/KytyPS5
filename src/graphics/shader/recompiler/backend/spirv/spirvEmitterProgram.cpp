@@ -496,7 +496,81 @@ uint32_t ValueEmitContext::HalfArg(const IR::Inst& inst, size_t index, uint32_t 
 	return lane_half == half ? Arg(inst, index) : other_half->Arg(inst, index);
 }
 
+namespace {
+
+uint32_t PairSeqElement(EmitterState& state, uint32_t index) {
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAccessChain,
+	                          TypeU32ElementPointer(state, spv::StorageClassWorkgroup), pointer,
+	                          state.pair_seq_variable, index);
+	return pointer;
+}
+
+// The two host subgroups of one guest wave meet: each publishes its handshake count and waits
+// for its partner's. Both run the same sequence of handshakes (split-mode branches are
+// wave-uniform), and independently scheduled subgroups make progress while one spins.
+void EmitPairSync(EmitterState& state) {
+	const auto u         = TypeU32(state);
+	const auto b         = TypeBool(state);
+	const auto workgroup = ConstantU32(state, spv::ScopeWorkgroup);
+	const auto memory    = spv::MemorySemanticsWorkgroupMemoryMask;
+	const auto gen       = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, u, gen, state.pair_gen_variable);
+	const auto next = Binary(state, spv::OpIAdd, u, gen, ConstantU32(state, 1u));
+	state.builder.AddFunction(spv::OpStore, state.pair_gen_variable, next);
+	const auto mine    = Binary(state, spv::OpShiftRightLogical, u, EmitLocalInvocationIndex(state),
+	                            ConstantU32(state, 5u));
+	const auto partner = Binary(state, spv::OpBitwiseXor, u, mine, ConstantU32(state, 1u));
+	state.builder.AddFunction(spv::OpAtomicStore, PairSeqElement(state, mine), workgroup,
+	                          ConstantU32(state, spv::MemorySemanticsReleaseMask | memory), next);
+	const auto header = state.builder.AllocateId(), body = state.builder.AllocateId();
+	const auto cont = state.builder.AllocateId(), merge = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpBranch, header);
+	EmitLabel(state, header);
+	state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlDontUnrollMask);
+	state.builder.AddFunction(spv::OpBranch, body);
+	EmitLabel(state, body);
+	const auto seen = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAtomicLoad, u, seen, PairSeqElement(state, partner), workgroup,
+	                          ConstantU32(state, spv::MemorySemanticsAcquireMask | memory));
+	// Wrap-safe "seen >= next".
+	const auto done = Binary(state, spv::OpULessThan, b,
+	                         Binary(state, spv::OpISub, u, seen, next), ConstantU32(state, 0x80000000u));
+	state.builder.AddFunction(spv::OpBranchConditional, done, merge, cont);
+	EmitLabel(state, cont);
+	state.builder.AddFunction(spv::OpBranch, header);
+	EmitLabel(state, merge);
+	state.builder.AddFunction(spv::OpMemoryBarrier, workgroup,
+	                          ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | memory));
+}
+
+} // namespace
+
 void EmitSplitWaveBarrier(EmitterState& state) {
+	if (state.split_waves > 1u) {
+		EmitPairSync(state);
+		return;
+	}
+	state.builder.AddFunction(
+	    spv::OpControlBarrier, ConstantU32(state, spv::ScopeWorkgroup),
+	    ConstantU32(state, spv::ScopeWorkgroup),
+	    ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask |
+	                           spv::MemorySemanticsWorkgroupMemoryMask));
+}
+
+void EmitSplitWavePrologue(EmitterState& state) {
+	if (state.split_waves <= 1u) {
+		return;
+	}
+	// Workgroup memory starts undefined: clear the handshake counters before any handshake.
+	const auto u     = TypeU32(state);
+	const auto index = EmitLocalInvocationIndex(state);
+	const auto count = ConstantU32(state, 2u * state.split_waves);
+	const auto slot  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelect, u, slot,
+	                          Binary(state, spv::OpULessThan, TypeBool(state), index, count), index,
+	                          ConstantU32(state, 0u));
+	state.builder.AddFunction(spv::OpStore, PairSeqElement(state, slot), ConstantU32(state, 0u));
 	state.builder.AddFunction(
 	    spv::OpControlBarrier, ConstantU32(state, spv::ScopeWorkgroup),
 	    ConstantU32(state, spv::ScopeWorkgroup),
@@ -531,14 +605,24 @@ uint32_t SplitWaveLoad(EmitterState& state, uint32_t lane) {
 
 } // namespace
 
+// Slot of guest lane `lane` (0..63) of this invocation's wave.
+uint32_t SplitWaveLaneSlot(EmitterState& state, uint32_t lane) {
+	if (state.split_waves <= 1u) {
+		return lane;
+	}
+	const auto base = EmitAndConstant(state, EmitLocalInvocationIndex(state), ~63u);
+	return Binary(state, spv::OpIAdd, TypeU32(state), base, lane);
+}
+
 std::pair<uint32_t, uint32_t> EmitSplitWaveExchangeHalves(EmitterState& state, uint32_t word) {
 	SplitWavePublish(state, word);
-	return {SplitWaveLoad(state, ConstantU32(state, 0)), SplitWaveLoad(state, ConstantU32(state, 32))};
+	return {SplitWaveLoad(state, SplitWaveLaneSlot(state, ConstantU32(state, 0))),
+	        SplitWaveLoad(state, SplitWaveLaneSlot(state, ConstantU32(state, 32)))};
 }
 
 uint32_t EmitSplitWaveReadLane(EmitterState& state, uint32_t value, uint32_t lane) {
 	SplitWavePublish(state, value);
-	return SplitWaveLoad(state, EmitAndConstant(state, lane, 63u));
+	return SplitWaveLoad(state, SplitWaveLaneSlot(state, EmitAndConstant(state, lane, 63u)));
 }
 
 uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
@@ -832,11 +916,18 @@ void EmitProgram(EmitterState& state) {
 			                          lane.scratch_u32_variable, spv::StorageClassFunction);
 		}
 	}
+	if (state.pair_gen_variable != 0) {
+		state.builder.AddFunction(spv::OpVariable,
+		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
+		                          state.pair_gen_variable, spv::StorageClassFunction,
+		                          ConstantU32(state, 0u));
+	}
 	if (state.gds_variable != 0) {
 		state.gds_length = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpArrayLength, TypeU32(state), state.gds_length,
 		                          state.gds_variable, 0);
 	}
+	EmitSplitWavePrologue(state);
 	if (state.pixel_valid_mask_variable != 0) {
 		state.builder.AddFunction(spv::OpStore, state.pixel_valid_mask_variable,
 		                          ConstantU32(state, 1));

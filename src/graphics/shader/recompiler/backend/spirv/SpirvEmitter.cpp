@@ -22,15 +22,34 @@ namespace {
 // The whole workgroup must be one wave, so a workgroup barrier joins exactly its two host
 // subgroups (branches are wave-uniform, so both reach every exchange), and every cross-lane
 // operation must be one the split emitters handle.
+bool SplitMultiWaveEnabled() {
+	// On by default; KYTY_SPLIT_WAVE64_MULTI=0 keeps multi-wave workgroups at two lanes per
+	// invocation.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_SPLIT_WAVE64_MULTI");
+		return value == nullptr || value[0] != '0';
+	}();
+	return enabled;
+}
+
+uint32_t SplitWaveThreads(ShaderStageInputInfo input_info) {
+	const auto& cs = *input_info.compute;
+	return std::max(cs.threads_num[0], 1u) * std::max(cs.threads_num[1], 1u) *
+	       std::max(cs.threads_num[2], 1u);
+}
+
 bool CanSplitWave(const IR::Program& program, ShaderStageInputInfo input_info) {
 	if (program.stage != ShaderType::Compute || !input_info.compute->split_wave64) {
 		return false;
 	}
 	const auto& cs      = *input_info.compute;
-	const auto  threads = std::max(cs.threads_num[0], 1u) * std::max(cs.threads_num[1], 1u) *
-	                     std::max(cs.threads_num[2], 1u);
-	if (threads != 64u || program.info.compute_derivatives || program.info.shared_int64_atomics ||
-	    program.info.uses_swizzle || cs.lds_size_dwords * 4u + 256u > 48u * 1024u) {
+	const auto  threads = SplitWaveThreads(input_info);
+	const auto  waves   = threads / 64u;
+	// Several waves need whole waves; their exchange words and handshake counters share LDS.
+	if (threads % 64u != 0u || waves == 0u || waves > 16u ||
+	    (waves > 1u && !SplitMultiWaveEnabled()) || program.info.compute_derivatives ||
+	    program.info.shared_int64_atomics || program.info.uses_swizzle ||
+	    cs.lds_size_dwords * 4u + threads * 4u + waves * 8u + 256u > 48u * 1024u) {
 		return false;
 	}
 	for (const auto* block: program.blocks) {
@@ -79,8 +98,9 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	        ? 2u
 	        : 1u;
 	if (state.lane_count == 2u && CanSplitWave(program, input_info)) {
-		state.lane_count = 1u;
-		state.split_wave = true;
+		state.lane_count  = 1u;
+		state.split_wave  = true;
+		state.split_waves = SplitWaveThreads(input_info) / 64u;
 	}
 	DefineModule(state);
 	EmitProgram(state);

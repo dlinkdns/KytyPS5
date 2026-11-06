@@ -116,6 +116,12 @@ struct EmitterState {
 	// operations combine the halves through wave_exchange_variable (64 dwords of shared memory).
 	bool                                             split_wave              = false;
 	uint32_t                                         wave_exchange_variable  = 0;
+	// Guest waves per workgroup in split mode. With more than one, the two host subgroups of a
+	// wave meet through a handshake on pair_seq_variable (one counter per host subgroup) instead
+	// of a workgroup barrier; pair_gen_variable counts each subgroup's handshakes.
+	uint32_t                                         split_waves             = 1;
+	uint32_t                                         pair_seq_variable       = 0;
+	uint32_t                                         pair_gen_variable       = 0;
 	std::array<BufferDefinition, 4>                  storage_buffers {};
 	std::vector<uint32_t>                           memory_byte_offsets;
 	std::vector<uint32_t>                           memory_byte_sizes;
@@ -326,6 +332,8 @@ uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
 std::pair<uint32_t, uint32_t> EmitSplitWaveExchangeHalves(EmitterState& state, uint32_t word);
 // Split waves: a workgroup barrier ordering shared memory between the wave's host subgroups.
 void EmitSplitWaveBarrier(EmitterState& state);
+// Clears the multi-wave handshake counters at the start of the entry function.
+void EmitSplitWavePrologue(EmitterState& state);
 // Split waves: reads a u32 from another lane of the 64-lane wave.
 uint32_t EmitSplitWaveReadLane(EmitterState& state, uint32_t value, uint32_t lane);
 

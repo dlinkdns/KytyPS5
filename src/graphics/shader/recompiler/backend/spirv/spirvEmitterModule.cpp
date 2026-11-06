@@ -717,8 +717,16 @@ void DefineModule(EmitterState& state) {
 	DefineDescriptors(state);
 	if (state.split_wave) {
 		state.wave_exchange_variable = state.builder.DefineGlobalVariable(
-		    TypeU32ArrayPointer(state, spv::StorageClassWorkgroup, 64u), spv::StorageClassWorkgroup);
+		    TypeU32ArrayPointer(state, spv::StorageClassWorkgroup, 64u * state.split_waves),
+		    spv::StorageClassWorkgroup);
 		state.builder.AddName(state.wave_exchange_variable, "wave_exchange");
+		if (state.split_waves > 1u) {
+			state.pair_seq_variable = state.builder.DefineGlobalVariable(
+			    TypeU32ArrayPointer(state, spv::StorageClassWorkgroup, 2u * state.split_waves),
+			    spv::StorageClassWorkgroup);
+			state.builder.AddName(state.pair_seq_variable, "wave_pair_seq");
+			state.pair_gen_variable = state.builder.AllocateId();
+		}
 	}
 	if (state.program.info.function_lds) {
 		state.lds_variable = state.builder.AllocateId();
