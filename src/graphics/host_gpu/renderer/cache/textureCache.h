@@ -12,7 +12,9 @@
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 
+#include <array>
 #include <bitset>
+#include <unordered_map>
 #include <map>
 #include <unordered_set>
 #include <vector>
@@ -117,6 +119,22 @@ private:
 	void                      UntrackImageTail(ImageId id);
 	void                      MarkAsMaybeDirty(ImageId id, Image& image);
 	void                      TrackImageDownload(ImageId id, Image& image);
+	using FindImageKey = std::array<uint64_t, 10>;
+	struct FindImageKeyHash {
+		size_t operator()(const FindImageKey& key) const noexcept {
+			uint64_t hash = 0xcbf29ce484222325ull;
+			for (const auto value: key) {
+				hash = (hash ^ value) * 0x100000001b3ull;
+				hash ^= hash >> 29u;
+			}
+			return static_cast<size_t>(hash);
+		}
+	};
+	struct FindImageMemo {
+		ImageId  id;
+		uint64_t epoch;
+	};
+	[[nodiscard]] static FindImageKey MakeFindImageKey(const ImageDesc& desc, bool exact_format);
 	[[nodiscard]] static bool SameBacking(const ImageInfo& cached, const ImageInfo& requested,
 	                                      bool exact_format);
 	[[nodiscard]] static BindingType UploadBinding(const Image& image);
@@ -169,6 +187,9 @@ private:
 	std::unordered_set<ImageId>                       m_download_images;
 	std::map<uint64_t, MetaDataInfo>                  m_surface_metas;
 	uint64_t                                          m_total_used_memory  = 0;
+	// Bumped whenever an image is registered, unregistered or re-associated.
+	uint64_t                                          m_image_epoch        = 1;
+	std::unordered_map<FindImageKey, FindImageMemo, FindImageKeyHash> m_find_image_memo;
 	uint64_t                                          m_trigger_gc_memory  = 0;
 	uint64_t                                          m_pressure_gc_memory = 1536ull * 1024 * 1024;
 	uint64_t         m_critical_gc_memory     = 3ull * 1024 * 1024 * 1024;

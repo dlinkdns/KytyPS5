@@ -19,6 +19,7 @@
 #include "kernel/memory.h"
 
 #include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -218,6 +219,7 @@ void TextureCache::RegisterImage(ImageId id) {
 		m_image_page_table[page].push_back(id);
 	});
 	image.registered = true;
+	m_image_epoch++;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
 	m_total_used_memory += image.AccountedSize();
 }
@@ -235,6 +237,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 	m_lru_cache.Free(image.lru_id);
 	m_total_used_memory -= image.AccountedSize();
 	image.registered = false;
+	m_image_epoch++;
 }
 
 void TextureCache::DeleteImage(ImageId id) {
@@ -1270,10 +1273,41 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 		}
 		record.info                 = plane;
 		record.depth_id             = depth_id;
+		m_image_epoch++;
 		record.stencil_subresources = depth.stencil_subresources;
 	}
 
 	return association;
+}
+
+namespace {
+
+bool FindImageMemoEnabled() {
+	// On by default; KYTY_NO_FIND_IMAGE_MEMO=1 always searches the page owners.
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_NO_FIND_IMAGE_MEMO");
+		return value == nullptr || value[0] != '1';
+	}();
+	return enabled;
+}
+
+} // namespace
+
+TextureCache::FindImageKey TextureCache::MakeFindImageKey(const ImageDesc& desc, bool exact_format) {
+	const auto& info = desc.info;
+	return {info.data.address,
+	        info.data.size,
+	        (uint64_t {info.extent.width} << 32u) | info.extent.height,
+	        (uint64_t {info.extent.depth} << 32u) | info.samples,
+	        (uint64_t {info.resources.levels} << 32u) | info.resources.layers,
+	        (uint64_t {info.bytes_per_block} << 32u) | static_cast<uint32_t>(info.tile_mode),
+	        (uint64_t {static_cast<uint32_t>(info.pixel_format)} << 32u) |
+	            static_cast<uint32_t>(info.guest_format),
+	        (uint64_t {static_cast<uint32_t>(info.type)} << 32u) |
+	            (static_cast<uint32_t>(desc.type) << 8u) | (uint32_t {info.bgra16} << 2u) |
+	            (uint32_t {desc.heap} << 1u) | uint32_t {exact_format},
+	        (uint64_t {static_cast<uint32_t>(info.metadata.kind)} << 32u) | info.pitch,
+	        info.metadata.range.address};
 }
 
 ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
@@ -1284,8 +1318,25 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 	ImageId result {};
 	{
 		std::scoped_lock lock {m_lock};
+		// Repeated lookups of one descriptor resolve to the same image until an image is
+		// registered, unregistered or re-associated (each bumps m_image_epoch).
+		const auto lookup_key = MakeFindImageKey(desc, exact_format);
+		if (FindImageMemoEnabled()) {
+			const auto hit = m_find_image_memo.find(lookup_key);
+			if (hit != m_find_image_memo.end() && hit->second.epoch == m_image_epoch) {
+				auto& image = m_slot_images[hit->second.id];
+				if (image.registered) {
+					result                   = hit->second.id;
+					image.tick_accessed_last = m_scheduler.CurrentTick();
+					TouchImage(image);
+				}
+			}
+		}
+		if (!result) {
 		const auto candidates  = FindImagesInRegion(desc.info.data.address, desc.info.data.size);
 		bool       block_alias = false;
+		bool       any_alias   = false;
+		bool       memo_ok     = true;
 
 		for (const auto id: candidates) {
 			const auto& image = m_slot_images[id];
@@ -1304,11 +1355,15 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			}
 			if (SameBacking(image.info, desc.info, exact_format)) {
 				result = id;
-			} else if (image.SafeToDownload() &&
-			           BcAlias::Matches(desc.info, image.info)) {
-				block_alias = true;
+			} else if (BcAlias::Matches(desc.info, image.info)) {
+				any_alias = true;
+				if (image.SafeToDownload()) {
+					block_alias = true;
+				}
 			}
 		}
+		// Only a direct match with no block-compressed alias candidate is reusable as is.
+		memo_ok = result && !any_alias;
 
 		int32_t view_mip   = -1;
 		int32_t view_layer = -1;
@@ -1357,6 +1412,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			}
 		}
 		if (!result) {
+			memo_ok = false;
 			result         = InsertImage(desc.info);
 			auto& inserted = m_slot_images[result];
 			if (m_buffer_cache.HasGpuDirtyBytes(inserted.info.data.address,
@@ -1373,6 +1429,13 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 		}
 		image.tick_accessed_last = m_scheduler.CurrentTick();
 		TouchImage(image);
+		if (memo_ok && view_mip < 0 && view_layer < 0 && FindImageMemoEnabled()) {
+			if (m_find_image_memo.size() >= 16384) {
+				m_find_image_memo.clear();
+			}
+			m_find_image_memo[lookup_key] = {result, m_image_epoch};
+		}
+		}
 	}
 	MaterializeColorClear(result, desc, metadata_base_layer);
 	if (desc.type == BindingType::VideoOut &&
