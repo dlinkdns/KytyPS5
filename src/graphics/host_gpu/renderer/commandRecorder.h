@@ -16,6 +16,9 @@ void Install();
 void Begin(vk::CommandBuffer buffer);
 // Before vkEndCommandBuffer: replays everything queued, then records directly again.
 void End(vk::CommandBuffer buffer);
+// Before code that records into `buffer` without the dispatcher (ImGui): replays everything
+// queued so far, so its commands follow them.
+void Sync(vk::CommandBuffer buffer);
 
 } // namespace Libs::Graphics::CommandRecorder
 

@@ -1074,6 +1074,13 @@ void Begin(vk::CommandBuffer buffer) {
 	g_active.store(static_cast<VkCommandBuffer>(buffer), std::memory_order_relaxed);
 }
 
+void Sync(vk::CommandBuffer buffer) {
+	if (g_installed && t_producer &&
+	    g_active.load(std::memory_order_relaxed) == static_cast<VkCommandBuffer>(buffer)) {
+		g_ring->Drain();
+	}
+}
+
 void End(vk::CommandBuffer buffer) {
 	if (!g_installed || !t_producer ||
 	    g_active.load(std::memory_order_relaxed) != static_cast<VkCommandBuffer>(buffer)) {

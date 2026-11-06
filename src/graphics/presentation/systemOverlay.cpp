@@ -1,4 +1,5 @@
 #include "graphics/presentation/systemOverlay.h"
+#include "graphics/host_gpu/renderer/commandRecorder.h"
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
@@ -1869,6 +1870,8 @@ struct SystemOverlay::Impl {
 		rendering.pColorAttachments    = &color;
 		command.beginRendering(rendering);
 		{
+			// ImGui records through its own function pointers: earlier commands go first.
+			CommandRecorder::Sync(command);
 			Common::LockGuard queue_lock(graphics.queue_mutex);
 			ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(),
 			                                static_cast<VkCommandBuffer>(command));

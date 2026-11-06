@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/renderer/commandRecorder.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "common/common.h"
 #include "common/profiler.h"
 #include "common/threads.h"
@@ -30,7 +31,10 @@ void CommandBuffer::Begin() {
 	auto result = buffer.begin(&begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-	CommandRecorder::Begin(buffer);
+	// One producer: only the GPU thread's command buffers (the presenter has its own scheduler).
+	if (GuestGpu::IsGpuThread()) {
+		CommandRecorder::Begin(buffer);
+	}
 }
 
 void CommandBuffer::End() const {
