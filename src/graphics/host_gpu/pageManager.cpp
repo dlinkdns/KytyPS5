@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/regionDefinitions.h"
+#include "graphics/host_gpu/unprotectableRanges.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -186,10 +187,18 @@ struct PageManager::Impl {
 	}
 
 	void Protect(uint64_t vaddr, uint64_t size, Common::VirtualMemory::Mode mode) noexcept {
-		if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(vaddr, size, mode)) {
-			Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32, vaddr,
-			      static_cast<uint32_t>(mode));
+		const auto apply = [mode](uint64_t address, uint64_t bytes) {
+			if (!Libs::LibKernel::Memory::ProtectGuestHostMemory(address, bytes, mode)) {
+				Fatal("address-space protection failed at 0x%016" PRIx64 ", mode=0x%08" PRIx32,
+				      address, static_cast<uint32_t>(mode));
+			}
+		};
+		if (mode == Common::VirtualMemory::Mode::ReadWrite) {
+			apply(vaddr, size);
+			return;
 		}
+		// Never restrict guest stacks (fibers); see unprotectableRanges.h.
+		UnprotectableRanges::ForEachProtectable(vaddr, size, apply);
 	}
 
 	template <bool track, bool is_read, bool masked>

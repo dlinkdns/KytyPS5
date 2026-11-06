@@ -1,4 +1,5 @@
 #include "common/abi.h"
+#include "graphics/host_gpu/unprotectableRanges.h"
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -2542,6 +2543,15 @@ int32_t KYTY_SYSV_ABI FiberInitialize(FiberObject* fiber, const char* name, Fibe
 
 	if (addr_context != nullptr) {
 		*static_cast<uint64_t*>(addr_context) = FIBER_STACK_MAGIC;
+		// Fiber stacks live in guest memory that GPU tracking may write-protect; a protected
+		// stack page kills the process on the next push. Keep them writable.
+		const auto begin = reinterpret_cast<uint64_t>(addr_context);
+		Libs::Graphics::UnprotectableRanges::Add(begin, size_context);
+		const auto first = begin & ~(Libs::Graphics::UnprotectableRanges::Granularity - 1);
+		const auto last  = (begin + size_context + Libs::Graphics::UnprotectableRanges::Granularity - 1) &
+		                  ~(Libs::Graphics::UnprotectableRanges::Granularity - 1);
+		(void)Libs::LibKernel::Memory::ProtectGuestHostMemory(first, last - first,
+		                                     Common::VirtualMemory::Mode::ReadWrite);
 	}
 
 	LOGF("\t fiber init: %s, entry = 0x%016" PRIx64 ", context = 0x%016" PRIx64 ", size = %" PRIu64
