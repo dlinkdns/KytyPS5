@@ -2,6 +2,10 @@
 
 #include "common/alignment.h"
 
+#include <array>
+#include <cstdlib>
+#include <unordered_map>
+
 namespace Libs::Graphics {
 namespace {
 
@@ -76,7 +80,86 @@ vk::Extent3D ImageInfo::MipExtent(uint32_t level) const {
 	        IsVolume() ? std::max(extent.depth >> level, 1u) : resources.layers};
 }
 
+namespace {
+
+// UpdateSize runs for every texture a draw binds; its result depends only on these fields.
+using SizeKey = std::array<uint64_t, 15>;
+
+struct SizeKeyHash {
+	size_t operator()(const SizeKey& key) const noexcept {
+		uint64_t hash = 0xcbf29ce484222325ull;
+		for (const auto value: key) {
+			hash = (hash ^ value) * 0x100000001b3ull;
+			hash ^= hash >> 29u;
+		}
+		return static_cast<size_t>(hash);
+	}
+};
+
+struct SizeResult {
+	uint64_t                     data_size;
+	uint32_t                     pitch;
+	uint32_t                     bytes_per_block;
+	std::array<ImageMipInfo, 16> mip_layout;
+	TileTextureBlockLayout       tiling;
+	uint64_t                     tiled_slice_stride;
+	uint64_t                     linear_slice_stride;
+	uint32_t                     first_tail_level;
+};
+
+SizeKey MakeSizeKey(const ImageInfo& info) {
+	return {static_cast<uint64_t>(info.guest_format),
+	        static_cast<uint64_t>(info.pixel_format),
+	        static_cast<uint64_t>(info.type),
+	        info.extent.width,
+	        info.extent.height,
+	        info.extent.depth,
+	        info.resources.levels,
+	        info.resources.layers,
+	        info.samples,
+	        info.bytes_per_block,
+	        info.data.size,
+	        info.data.address,
+	        info.pitch,
+	        static_cast<uint64_t>(info.tile_mode),
+	        static_cast<uint64_t>(info.metadata.kind)};
+}
+
+bool SizeCacheEnabled() {
+	static const bool enabled = std::getenv("KYTY_NO_IMAGE_SIZE_CACHE") == nullptr;
+	return enabled;
+}
+
+} // namespace
+
 void ImageInfo::UpdateSize() {
+	if (!SizeCacheEnabled()) {
+		UpdateSizeUncached();
+		return;
+	}
+	thread_local std::unordered_map<SizeKey, SizeResult, SizeKeyHash> cache;
+	const auto key = MakeSizeKey(*this);
+	if (const auto found = cache.find(key); found != cache.end()) {
+		const auto& result  = found->second;
+		data.size           = result.data_size;
+		pitch               = result.pitch;
+		bytes_per_block     = result.bytes_per_block;
+		mip_layout          = result.mip_layout;
+		tiling              = result.tiling;
+		tiled_slice_stride  = result.tiled_slice_stride;
+		linear_slice_stride = result.linear_slice_stride;
+		first_tail_level    = result.first_tail_level;
+		return;
+	}
+	UpdateSizeUncached();
+	if (cache.size() >= 16384) {
+		cache.clear();
+	}
+	cache.emplace(key, SizeResult {data.size, pitch, bytes_per_block, mip_layout, tiling,
+	                                tiled_slice_stride, linear_slice_stride, first_tail_level});
+}
+
+void ImageInfo::UpdateSizeUncached() {
 	EXIT_IF(guest_format == Prospero::BufferFormat::kInvalid || extent.width == 0 ||
 	        extent.height == 0 || extent.depth == 0 || resources.levels == 0 ||
 	        resources.levels > mip_layout.size() || resources.layers == 0 || samples == 0 ||
