@@ -204,6 +204,7 @@ void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operatio
 
 void CommandProcessor::BufferInit() {
 	GetScheduler().Begin(m_ctx, m_ucfg, m_sh_ctx);
+	m_renderer.GetBufferCache().RefreshStickyPages();
 }
 
 void CommandProcessor::BufferFlush() {
@@ -290,6 +291,11 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	for (uint32_t i = 0; i < dw_num; i++) {
 		*output = src[i];
 		output += !write_one_address;
+	}
+	{
+		m_renderer.GetBufferCache().NoteCpuWrite(
+		    reinterpret_cast<uint64_t>(dst),
+		    uint64_t {write_one_address ? 1u : dw_num} * sizeof(uint32_t));
 	}
 }
 

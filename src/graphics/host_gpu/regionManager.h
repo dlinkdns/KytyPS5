@@ -96,6 +96,15 @@ public:
 			if (m_gpu_dirty.FirstRangeFrom(start).first < end) {
 				EXIT("CPU dirty state conflicts with GPU dirty state\n");
 			}
+			NoteCpuWrite(start, end);
+		}
+		if constexpr (source == DirtySource::Gpu && enable) {
+			// GPU-owned pages must fault on CPU writes again.
+			if (m_sticky.FirstRangeFrom(start).first < end) {
+				m_sticky.UnsetRange(start, end);
+				m_cpu_dirty.UnsetRange(start, end);
+				UpdateProtection<true, false>();
+			}
 		}
 		auto& bits = GetBits<source>();
 		if constexpr (enable) {
@@ -131,12 +140,81 @@ public:
 		}
 	}
 
+	// Pages the guest CPU rewrites again and again stay unprotected ("sticky"): instead of a
+	// write fault and two protection changes per write, they are marked dirty again by every
+	// RefreshSticky (once per guest command buffer) and uploaded when next used. Called with the
+	// lock held; returns whether the region still has sticky pages.
+	bool RefreshSticky(uint32_t epoch) {
+		if (m_sticky.None()) {
+			return false;
+		}
+		if (epoch - m_sticky_epoch >= StickyLifetime) {
+			// Track the pages again; still-hot ones turn sticky again after two writes.
+			m_sticky.Clear();
+			UpdateProtection<true, false>();
+			return false;
+		}
+		auto dirty = m_sticky;
+		dirty &= ~m_gpu_dirty;
+		m_cpu_dirty |= dirty;
+		return true;
+	}
+
+	[[nodiscard]] bool TakeNewSticky() noexcept { return std::exchange(m_has_new_sticky, false); }
+
+	static bool StickyEnabled() {
+		// On by default; KYTY_NO_STICKY_PAGES=1 protects every uploaded page again.
+		static const bool enabled = [] {
+			const char* value = std::getenv("KYTY_NO_STICKY_PAGES");
+			return value == nullptr || value[0] != '1';
+		}();
+		return enabled;
+	}
+
+	static std::atomic<uint32_t>& StickyEpoch() {
+		static std::atomic<uint32_t> epoch {0};
+		return epoch;
+	}
+
 	TrackingSpinLock lock;
 
 private:
+	static constexpr uint32_t StickyFaultWindow = 64;
+	static constexpr uint32_t StickyLifetime    = 4096;
+	static constexpr size_t   StickyMaxPages    = 16;
+
+	// A guest CPU write of a few clean pages: a page written twice within the window turns
+	// sticky.
+	void NoteCpuWrite(size_t start, size_t end) {
+		if (!StickyEnabled() || end - start > StickyMaxPages) {
+			return;
+		}
+		const auto epoch = StickyEpoch().load(std::memory_order_relaxed);
+		if (epoch - m_faulted_epoch >= StickyFaultWindow) {
+			m_faulted.Clear();
+			m_faulted_epoch = epoch;
+		}
+		for (size_t page = start; page < end; page++) {
+			if (m_cpu_dirty.Get(page) || m_sticky.Get(page)) {
+				continue;
+			}
+			if (!m_faulted.Get(page)) {
+				m_faulted.Set(page);
+				continue;
+			}
+			if (m_sticky.None()) {
+				m_sticky_epoch = epoch;
+			}
+			m_sticky.Set(page);
+			m_has_new_sticky = true;
+		}
+	}
+
 	template <bool track, bool is_read>
 	void UpdateProtection() {
-		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
+		auto writable = m_cpu_dirty;
+		writable |= m_sticky;
+		const auto protection = is_read ? ~m_gpu_dirty : writable;
 		auto&      previous   = is_read ? m_readable : m_writable;
 		auto       mask       = protection ^ previous;
 		if (mask.None()) {
@@ -175,6 +253,11 @@ private:
 	RegionBits   m_gpu_dirty;
 	RegionBits   m_writable;
 	RegionBits   m_readable;
+	RegionBits   m_faulted;
+	RegionBits   m_sticky;
+	uint32_t     m_faulted_epoch  = 0;
+	uint32_t     m_sticky_epoch   = 0;
+	bool         m_has_new_sticky = false;
 };
 
 } // namespace Libs::Graphics

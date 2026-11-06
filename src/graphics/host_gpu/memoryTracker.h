@@ -26,11 +26,14 @@ public:
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
+	// Once per guest command buffer: sticky pages (see RegionManager) count as CPU-modified again.
+	void               RefreshSticky();
 	// Removes protection from a range and flushes GPU-owned data when required.
 	template <typename Flush>
 	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {
 		static_assert(std::is_invocable_v<Flush&>);
 		Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+			bool       new_sticky   = false;
 			const bool should_flush = [&] {
 				// Perform both the GPU modification check and CPU state change with the lock in
 				// case the GPU thread is racing to mark the page modified. If a flush is needed,
@@ -40,8 +43,13 @@ public:
 					return true;
 				}
 				manager->ChangeState<DirtySource::Cpu, true>(offset, bytes);
+				new_sticky = manager->TakeNewSticky();
 				return false;
 			}();
+			// Outside the region lock: RefreshSticky takes the list lock first.
+			if (new_sticky) {
+				AddStickyRegion(manager);
+			}
 			if (should_flush) {
 				on_flush();
 			}
@@ -125,11 +133,14 @@ private:
 	}
 
 	static void    ValidateRange(uint64_t vaddr, uint64_t size);
+	void           AddStickyRegion(RegionManager* manager);
 	RegionManager* GetOrCreateRegion(uint64_t index);
 
 	std::unique_ptr<std::atomic<RegionManager*>[]> m_regions;
 	std::vector<std::unique_ptr<RegionManager>>    m_region_storage;
 	std::mutex                                     m_region_mutex;
+	std::mutex                                     m_sticky_mutex;
+	std::vector<RegionManager*>                    m_sticky_regions;
 	PageManager&                                   m_page_manager;
 };
 
