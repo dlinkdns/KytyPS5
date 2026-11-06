@@ -604,7 +604,11 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	    // The renderer only uses the Vulkan 1.3 core dynamic states, but RADV (Mesa 26.3) creates
 	    // its PS epilog cache only when this EXT feature is enabled and crashes in vkCmdDraw when
 	    // a depth- or stencil-writing fragment shader needs an epilog.
-	    vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT {.extendedDynamicState = VK_TRUE}};
+	    vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT {.extendedDynamicState = VK_TRUE},
+	    vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR {.pipelineExecutableInfo = VK_TRUE}};
+	if (!GpuCheckpoints::PipelineStats::Requested()) {
+		create.unlink<vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR>();
+	}
 	if (!workgroup_layout.workgroupMemoryExplicitLayout) {
 		create.unlink<vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR>();
 	}
@@ -919,6 +923,10 @@ void WindowContext::CreateVulkan() {
 		device_extensions.push_back(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
 		GpuCheckpoints::Enabled().store(true);
 		std::printf("GPU checkpoints enabled (VK_NV_device_diagnostic_checkpoints)\n");
+	}
+	if (GpuCheckpoints::PipelineStats::Requested()) {
+		device_extensions.push_back(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME);
+		std::printf("Pipeline statistics enabled (VK_KHR_pipeline_executable_properties)\n");
 	}
 
 	std::string rejected_devices;

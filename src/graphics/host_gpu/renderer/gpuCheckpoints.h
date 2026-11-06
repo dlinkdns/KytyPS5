@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -201,6 +202,63 @@ inline void Mark(vk::CommandBuffer buffer, uint32_t kind, uint64_t hash, uint64_
 	Ring()[id % RingSize] = Entry {kind, hash, hash2, x, y, z};
 	buffer.setCheckpointNV(reinterpret_cast<const void*>(static_cast<uintptr_t>(id)));
 }
+
+// KYTY_PIPELINE_STATS=1: compute pipelines are created with VK_KHR_pipeline_executable_properties
+// statistics, which are printed per shader (register count, spills, ...).
+namespace PipelineStats {
+inline bool Requested() {
+	static const bool requested = [] {
+		const char* value = std::getenv("KYTY_PIPELINE_STATS");
+		return value != nullptr && value[0] == '1';
+	}();
+	return requested;
+}
+
+inline void Print(vk::Device device, vk::Pipeline pipeline, uint64_t hash, uint32_t wave_size) {
+	vk::PipelineInfoKHR info {};
+	info.pipeline = pipeline;
+	uint32_t count = 0;
+	if (device.getPipelineExecutablePropertiesKHR(&info, &count, nullptr) != vk::Result::eSuccess) {
+		return;
+	}
+	std::vector<vk::PipelineExecutablePropertiesKHR> executables(count);
+	(void)device.getPipelineExecutablePropertiesKHR(&info, &count, executables.data());
+	for (uint32_t index = 0; index < count; index++) {
+		vk::PipelineExecutableInfoKHR executable {};
+		executable.pipeline        = pipeline;
+		executable.executableIndex = index;
+		uint32_t stat_count        = 0;
+		if (device.getPipelineExecutableStatisticsKHR(&executable, &stat_count, nullptr) !=
+		    vk::Result::eSuccess) {
+			continue;
+		}
+		std::vector<vk::PipelineExecutableStatisticKHR> stats(stat_count);
+		(void)device.getPipelineExecutableStatisticsKHR(&executable, &stat_count, stats.data());
+		std::string line;
+		for (const auto& stat: stats) {
+			char value[64] {};
+			switch (stat.format) {
+				case vk::PipelineExecutableStatisticFormatKHR::eBool32:
+					std::snprintf(value, sizeof(value), "%u", stat.value.b32); break;
+				case vk::PipelineExecutableStatisticFormatKHR::eInt64:
+					std::snprintf(value, sizeof(value), "%lld", static_cast<long long>(stat.value.i64)); break;
+				case vk::PipelineExecutableStatisticFormatKHR::eUint64:
+					std::snprintf(value, sizeof(value), "%llu", static_cast<unsigned long long>(stat.value.u64)); break;
+				case vk::PipelineExecutableStatisticFormatKHR::eFloat64:
+					std::snprintf(value, sizeof(value), "%.2f", stat.value.f64); break;
+			}
+			line += " | ";
+			line += stat.name.data();
+			line += "=";
+			line += value;
+		}
+		std::printf("pipeline stats CS 0x%016llx wave%u subgroup%u%s\n",
+		            static_cast<unsigned long long>(hash), wave_size,
+		            executables[index].subgroupSize, line.c_str());
+	}
+	std::fflush(stdout);
+}
+} // namespace PipelineStats
 
 // KYTY_SKIP_SHADER=<hex hash>[,<hex hash>...] drops dispatches and draws of those shaders.
 inline bool SkipShader(uint64_t hash) {

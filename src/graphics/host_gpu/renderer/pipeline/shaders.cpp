@@ -388,10 +388,17 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	}
 	info.stage  = comp_shader_stage_info;
 	info.layout = pipeline.pipeline_layout;
+	if (GpuCheckpoints::PipelineStats::Requested()) {
+		info.flags |= vk::PipelineCreateFlagBits::eCaptureStatisticsKHR;
+	}
 
 	const auto result =
 	    graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (GpuCheckpoints::PipelineStats::Requested()) {
+		GpuCheckpoints::PipelineStats::Print(graphics.device, pipeline.pipeline,
+		                                     module.info.shader_hash, wave_size);
+	}
 }
 
 } // namespace Libs::Graphics
