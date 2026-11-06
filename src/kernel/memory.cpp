@@ -460,6 +460,10 @@ public:
 		return clamped_size;
 	}
 
+	[[nodiscard]] uint64_t Generation() const noexcept {
+		return m_generation.load(std::memory_order_acquire);
+	}
+
 	uint64_t CountPageTableEntries(bool gpu) {
 		Common::LockGuard lock(m_mutex);
 		return gpu ? m_gpu_page_table_entries : m_cpu_page_table_entries;
@@ -503,6 +507,8 @@ private:
 	}
 
 	void UpdatePageTableEntries(const Range& range, bool add) {
+		// Every change to the ranges passes here.
+		m_generation.fetch_add(1, std::memory_order_release);
 		if (!IsCommittedRangeType(range.type)) {
 			return;
 		}
@@ -638,6 +644,7 @@ private:
 
 	RangeMap      m_ranges;
 	Common::Mutex m_mutex;
+	std::atomic<uint64_t> m_generation {1};
 	uint64_t      m_cpu_page_table_entries = 0;
 	uint64_t      m_gpu_page_table_entries = 0;
 };
@@ -882,7 +889,24 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 	EXIT_IF(g_virtual_ranges == nullptr);
 
+	// Draws clamp the same ranges over and over; remember results until the ranges change.
+	struct Entry {
+		uint64_t generation = 0;
+		uint64_t vaddr      = 0;
+		uint64_t size       = 0;
+		uint64_t result     = 0;
+	};
+	static thread_local std::array<Entry, 64> cache {};
+	const auto generation = g_virtual_ranges->Generation();
+	auto&      entry      = cache[((vaddr >> 12u) ^ (vaddr >> 20u) ^ (size >> 12u)) & 63u];
+	if (entry.generation == generation && entry.vaddr == vaddr && entry.size == size) {
+		return entry.result;
+	}
+
 	const auto clamped_size = g_virtual_ranges->ClampRangeSize(vaddr, size);
+	if (clamped_size != 0) {
+		entry = {generation, vaddr, size, clamped_size};
+	}
 	if (clamped_size == 0) {
 		EXIT("Memory: attempted to access invalid address 0x%016" PRIx64 " with size 0x%016" PRIx64
 		     "\n",
