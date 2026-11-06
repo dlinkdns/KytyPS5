@@ -26,6 +26,7 @@ DescriptorHeap::DescriptorHeap(GraphicContext& graphics, MasterSemaphore& master
 DescriptorHeap::~DescriptorHeap() {
 	m_graphics.device.destroyDescriptorPool(m_current_pool, nullptr);
 	for (const auto& [pool, tick]: m_pending_pools) {
+		Libs::Graphics::GpuWaitTag wait_tag_("descriptor-heap");
 		m_master_semaphore.Wait(tick);
 		m_graphics.device.destroyDescriptorPool(pool, nullptr);
 	}

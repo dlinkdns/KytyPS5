@@ -240,6 +240,7 @@ void CommandScheduler::PriorityOperationsThread(std::stop_token stop) {
 			m_priority_operations.pop();
 			m_priority_active_tick = operation.tick;
 		}
+		Libs::Graphics::GpuWaitTag wait_tag_("pending-operation");
 		m_master.Wait(operation.tick);
 		if (!stop.stop_requested()) {
 			RunOperation(std::move(operation.callback));

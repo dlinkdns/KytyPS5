@@ -226,6 +226,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		m_scheduler.DeferPriorityOperation(std::move(publish));
 	} else {
 		const auto tick = m_scheduler.CurrentTick();
+		Libs::Graphics::GpuWaitTag wait_tag_("buffer-download-sync");
 		m_scheduler.Wait(tick);
 		m_scheduler.WaitPriorityOperations(tick);
 		publish();
@@ -687,6 +688,7 @@ void BufferCache::RunGarbageCollector() {
 
 	// Publish all queued downloads before releasing their tracked pages and owners.
 	const auto completion_tick = m_scheduler.CurrentTick();
+	Libs::Graphics::GpuWaitTag wait_tag_("buffer-gc-download");
 	m_scheduler.Wait(completion_tick);
 	m_scheduler.WaitPriorityOperations(completion_tick);
 	for (const auto id: dirty_buffers) {

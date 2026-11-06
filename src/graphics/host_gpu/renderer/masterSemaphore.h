@@ -10,6 +10,23 @@ namespace Libs::Graphics {
 
 struct GraphicContext;
 
+// KYTY_TRACE_WAITS=1: callers label CPU-on-GPU waits with GpuWaitTag; MasterSemaphore::Wait sums
+// the time per label and prints the largest every ~2 s.
+class GpuWaitTag {
+public:
+	explicit GpuWaitTag(const char* tag) noexcept: m_previous(Current()) { Current() = tag; }
+	~GpuWaitTag() { Current() = m_previous; }
+	GpuWaitTag(const GpuWaitTag&)            = delete;
+	GpuWaitTag& operator=(const GpuWaitTag&) = delete;
+	static const char*& Current() noexcept {
+		static thread_local const char* tag = nullptr;
+		return tag;
+	}
+
+private:
+	const char* m_previous;
+};
+
 class MasterSemaphore {
 public:
 	explicit MasterSemaphore(GraphicContext& graphics);

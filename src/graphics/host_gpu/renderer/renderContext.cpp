@@ -109,6 +109,7 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 		     m_texture_cache.IsRegionRegistered(vaddr, size) ||
 		     m_command_scheduler.HasPendingPriorityOperations())) {
 			const auto tick = m_command_scheduler.CurrentTick();
+			Libs::Graphics::GpuWaitTag wait_tag_("unmap-finish");
 			m_command_scheduler.Finish();
 			m_command_scheduler.WaitPriorityOperations(tick);
 		}

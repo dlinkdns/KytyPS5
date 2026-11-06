@@ -76,6 +76,7 @@ FaultManager::~FaultManager() {
 
 void FaultManager::ProcessFaultBuffer() {
 	if (const auto wait_tick = m_fault_areas[m_current_area]; wait_tick != 0) {
+		Libs::Graphics::GpuWaitTag wait_tag_("fault-buffer");
 		m_scheduler.Wait(wait_tick);
 		m_scheduler.PopPendingOperations();
 	}

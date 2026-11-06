@@ -213,6 +213,7 @@ void CommandProcessor::BufferFlush() {
 }
 
 void CommandProcessor::BufferWait() {
+	Libs::Graphics::GpuWaitTag wait_tag_("cp-buffer-wait");
 	BufferInit();
 	GetScheduler().Finish();
 }
@@ -928,6 +929,7 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 		case 3: data = Sync::ReadReferenceClock(); [[fallthrough]];
 		case 2: write_label(&data, sizeof(data)); break;
 		case 5: {
+			Libs::Graphics::GpuWaitTag wait_tag_("eop-gds-read");
 			GetScheduler().Finish();
 			const auto gds = static_cast<uint32_t>(data);
 			Sync::ReadGds(*m_renderer.GetBufferCache().GetGdsBuffer(),
