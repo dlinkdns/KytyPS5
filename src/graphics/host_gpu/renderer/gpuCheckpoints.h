@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -74,6 +75,7 @@ struct State {
 	std::vector<size_t>                    open;
 	std::unordered_map<uint64_t, Total>    totals;
 	std::chrono::steady_clock::time_point  last = std::chrono::steady_clock::now();
+	std::mutex                             mutex;
 };
 inline constexpr uint32_t Capacity = 1u << 17u;
 
@@ -117,6 +119,7 @@ inline void Record(vk::CommandBuffer buffer, uint32_t kind, uint64_t hash) {
 	if (!s.pool || !buffer) {
 		return;
 	}
+	std::scoped_lock lock {s.mutex};
 	if (IsBegin(kind)) {
 		if (s.next + 2 > Capacity) {
 			return;
@@ -139,6 +142,7 @@ inline void Flush(vk::Queue queue) {
 	if (!s.pool) {
 		return;
 	}
+	std::scoped_lock lock {s.mutex};
 	const auto now = std::chrono::steady_clock::now();
 	if (now - s.last < std::chrono::seconds(2) && s.next + 4096 < Capacity) {
 		return;
