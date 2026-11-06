@@ -29,12 +29,14 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
 #include <ranges>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
+#include <spirv-tools/optimizer.hpp>
 #include <utility>
 #include <vector>
 #include <xxhash.h>
@@ -320,6 +322,24 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	const auto id = XXH3_64bits(inputs.bytes.data(), inputs.bytes.size());
 
 	const auto* stage = ShaderRecompiler::StageName(key.stage);
+	// Experiment: KYTY_SPIRV_OPT=1 runs the SPIRV-Tools performance passes on translated code.
+	static const bool spirv_opt = [] {
+		const char* value = std::getenv("KYTY_SPIRV_OPT");
+		return value != nullptr && value[0] == '1';
+	}();
+	if (spirv_opt) {
+		spvtools::Optimizer optimizer(SPV_ENV_VULKAN_1_3);
+		optimizer.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t&,
+		                                const char*) {});
+		optimizer.RegisterPerformancePasses();
+		spvtools::OptimizerOptions optimizer_options;
+		optimizer_options.set_run_validator(false);
+		std::vector<uint32_t> optimized;
+		if (optimizer.Run(result.spirv.data(), result.spirv.size(), &optimized, optimizer_options) &&
+		    !optimized.empty()) {
+			result.spirv = std::move(optimized);
+		}
+	}
 	DumpShader(result.spirv, fmt::format("{}_{:016x}_{:016x}.spv", stage, key.hash, id));
 	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
 	auto& module = program.modules.emplace_back(ShaderModule {
