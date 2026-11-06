@@ -169,10 +169,12 @@ public:
 	[[nodiscard]] bool TakeNewSticky() noexcept { return std::exchange(m_has_new_sticky, false); }
 
 	static bool StickyEnabled() {
-		// On by default; KYTY_NO_STICKY_PAGES=1 protects every uploaded page again.
+		// Off by default (KYTY_STICKY_PAGES=1 enables): keeping sticky pages current for BDA
+		// readers re-uploads them after every guest command buffer, which cost Tekken 8 more
+		// GPU-thread time (~6 us per draw) than the write faults it saves.
 		static const bool enabled = [] {
-			const char* value = std::getenv("KYTY_NO_STICKY_PAGES");
-			return value == nullptr || value[0] != '1';
+			const char* value = std::getenv("KYTY_STICKY_PAGES");
+			return value != nullptr && value[0] == '1';
 		}();
 		return enabled;
 	}
