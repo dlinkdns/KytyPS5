@@ -144,19 +144,25 @@ public:
 	// write fault and two protection changes per write, they are marked dirty again by every
 	// RefreshSticky (once per guest command buffer) and uploaded when next used. Called with the
 	// lock held; returns whether the region still has sticky pages.
-	bool RefreshSticky(uint32_t epoch) {
+	// on_dirty(address, size) receives each sticky range now marked CPU-modified, so callers can
+	// queue the work an ordinary write fault would.
+	template <typename Func>
+	bool RefreshSticky(uint32_t epoch, Func&& on_dirty) {
 		if (m_sticky.None()) {
 			return false;
 		}
-		if (epoch - m_sticky_epoch >= StickyLifetime) {
-			// Track the pages again; still-hot ones turn sticky again after two writes.
-			m_sticky.Clear();
-			UpdateProtection<true, false>();
-			return false;
-		}
+		// Writes since the last refresh did not fault: mark the pages modified first.
 		auto dirty = m_sticky;
 		dirty &= ~m_gpu_dirty;
 		m_cpu_dirty |= dirty;
+		for (const auto [first, last]: dirty) {
+			on_dirty(m_cpu_addr + first * TRACKER_PAGE_SIZE, (last - first) * TRACKER_PAGE_SIZE);
+		}
+		if (epoch - m_sticky_epoch >= StickyLifetime) {
+			// Track the pages again once uploaded; still-hot ones turn sticky after two writes.
+			m_sticky.Clear();
+			return false;
+		}
 		return true;
 	}
 

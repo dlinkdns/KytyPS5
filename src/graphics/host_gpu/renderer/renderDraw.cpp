@@ -840,7 +840,11 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             DrawRenderState& state) {
 	m_context.GetImageHeap().BeginDraw();
-	m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	{
+		DrawTrace::Scope trace_(DrawTrace::Programs);
+		m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	}
+	DrawTrace::Scope targets_trace_(DrawTrace::TargetLookup);
 	// Vertex programs beyond the host mesh limits or with unsupported call targets are not
 	// compiled.
 	if (state.vertex_info[0].stage.module == nullptr) {

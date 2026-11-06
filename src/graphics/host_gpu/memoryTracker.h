@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <type_traits>
@@ -27,7 +28,8 @@ public:
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	// Once per guest command buffer: sticky pages (see RegionManager) count as CPU-modified again.
-	void               RefreshSticky();
+	// on_dirty(address, size) runs, under a region lock, for each sticky range marked modified.
+	void               RefreshSticky(const std::function<void(uint64_t, uint64_t)>& on_dirty);
 	// Removes protection from a range and flushes GPU-owned data when required.
 	template <typename Flush>
 	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {

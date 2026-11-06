@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
+#include "graphics/host_gpu/renderer/drawTrace.h"
 #include <cstdio>
 #include <cstdlib>
 #include <unordered_set>
@@ -889,18 +890,23 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
                                              std::span<RenderColorInfo> colors) {
 	bool uses_dma        = false;
 	bool uses_image_heap = false;
-	FindBuffers(stages);
+	{
+		DrawTrace::Scope trace_(DrawTrace::FindBuffersStage);
+		FindBuffers(stages);
+	}
 	for (auto* stage: stages) {
 		uses_dma |= stage->runtime->module->info.info.uses_dma;
 		uses_image_heap |= stage->runtime->module->info.info.uses_image_heap;
 	}
 	if (uses_dma) {
+		DrawTrace::Scope trace_(DrawTrace::BdaStage);
 		m_context.PrepareBda();
 	}
 	if (uses_image_heap) {
 		m_context.GetImageHeap().Rebind(*this);
 	}
 	for (auto* stage: stages) {
+		DrawTrace::Scope trace_(DrawTrace::RebindImagesStage);
 		RebindImages(*stage);
 	}
 	auto& cache = m_context.GetTextureCache();
@@ -918,6 +924,7 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	// Discovery can read back PS5 metadata and submit the scheduler. Reserve draw buffers only
 	// after image identities are final; attachment layout transitions follow buffer alias copies.
 	for (auto* stage: stages) {
+		DrawTrace::Scope trace_(DrawTrace::RebindBuffersStage);
 		RebindBuffers(*stage);
 	}
 }

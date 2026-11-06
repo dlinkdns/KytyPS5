@@ -22,6 +22,12 @@ enum Stage : uint32_t {
 	Commit,
 	Record,
 	Dispatch,
+	Programs,
+	TargetLookup,
+	FindBuffersStage,
+	RebindImagesStage,
+	RebindBuffersStage,
+	BdaStage,
 	Count
 };
 
@@ -55,7 +61,9 @@ inline void Report() {
 	static constexpr const char* names[Count] = {"draw total",  "render state", "stage bindings",
 	                                             "graph bindings", "vertex/index", "pipeline",
 	                                             "render targets", "commit",       "record",
-	                                             "dispatch total"};
+	                                             "dispatch total", " > programs",  " > rt lookup",
+	                                             " > find buffers", " > images",   " > buffers",
+	                                             " > bda sync"};
 	std::printf("--- draw stages over %.1f s: %.0f draws/s, %.0f dispatches/s ---\n", seconds,
 	            static_cast<double>(state.draws) / seconds,
 	            static_cast<double>(state.dispatches) / seconds);

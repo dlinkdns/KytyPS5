@@ -104,12 +104,12 @@ void MemoryTracker::AddStickyRegion(RegionManager* manager) {
 	}
 }
 
-void MemoryTracker::RefreshSticky() {
+void MemoryTracker::RefreshSticky(const std::function<void(uint64_t, uint64_t)>& on_dirty) {
 	const auto epoch = RegionManager::StickyEpoch().fetch_add(1, std::memory_order_relaxed) + 1;
 	std::scoped_lock lock(m_sticky_mutex);
-	std::erase_if(m_sticky_regions, [epoch](RegionManager* manager) {
+	std::erase_if(m_sticky_regions, [epoch, &on_dirty](RegionManager* manager) {
 		std::scoped_lock region_lock(manager->lock);
-		return !manager->RefreshSticky(epoch);
+		return !manager->RefreshSticky(epoch, on_dirty);
 	});
 }
 
