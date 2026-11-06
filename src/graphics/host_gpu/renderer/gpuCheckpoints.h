@@ -100,7 +100,11 @@ inline void Init(vk::Device device, float timestamp_period) {
 	vk::QueryPoolCreateInfo info {};
 	info.queryType  = vk::QueryType::eTimestamp;
 	info.queryCount = Capacity;
-	s.pool          = device.createQueryPool(info);
+	if (device.createQueryPool(&info, nullptr, &s.pool) != vk::Result::eSuccess) {
+		s.pool = nullptr;
+		std::printf("GPU profiler: could not create the timestamp query pool\n");
+		return;
+	}
 	device.resetQueryPool(s.pool, 0, Capacity);
 	std::printf("GPU profiler enabled (timestamp period %.2f ns)\n", timestamp_period);
 }
