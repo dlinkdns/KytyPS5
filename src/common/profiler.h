@@ -16,6 +16,7 @@ inline constexpr uint32_t DeepOrangeA200 = 0xff6e40;
 namespace Profiler {
 
 void SetThreadName(const char* name);
+void SetHostThreadName(const char* name);
 
 void Initialize();
 void Shutdown();
