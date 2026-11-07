@@ -93,13 +93,7 @@ public:
 	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] RangeSet TakeBdaSync();
 	void               RunGarbageCollector();
-	// An emulator-side CPU store to guest memory: sticky pages do not fault, so cached copies
-	// learn of it here.
-	void               NoteCpuWrite(uint64_t vaddr, uint64_t size);
-	// Once per guest command buffer.
-	void               RefreshStickyPages() {
-		m_memory_tracker.RefreshSticky([this](uint64_t vaddr, uint64_t size) { QueueBdaSync(vaddr, size); });
-	}
+
 	// At a guest sync point, queues asynchronous downloads of GPU-written windows that guest CPU
 	// accesses recently had to download synchronously, so the next access needs no GPU wait.
 	void               PrefetchReadbacks();

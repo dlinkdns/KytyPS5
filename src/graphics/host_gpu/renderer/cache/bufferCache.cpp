@@ -923,7 +923,6 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 		// Access the guest mapping so write faults invalidate cached buffers and images.
 		auto* destination = reinterpret_cast<uint32_t*>(vaddr);
 		std::fill(destination, destination + size / sizeof(uint32_t), value);
-		NoteCpuWrite(vaddr, size);
 		return;
 	}
 
@@ -949,7 +948,6 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	    !IsRegionGpuModified(src_vaddr, size) && !m_texture_cache.FindImageFromRange(src_vaddr, size)) {
 		std::memcpy(reinterpret_cast<void*>(dst_vaddr), reinterpret_cast<const void*>(src_vaddr),
 		            size);
-		NoteCpuWrite(dst_vaddr, size);
 		return;
 	}
 
@@ -964,19 +962,6 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	auto [dst, dst_offset] = dst_memory ? ObtainBuffer(dst_vaddr, size, true, true, dst_id)
 	                                    : std::pair {&m_gds_buffer, dst_vaddr};
 	dst->CopyFrom(command, *src, src_offset, dst_offset, size);
-}
-
-void BufferCache::NoteCpuWrite(uint64_t vaddr, uint64_t size) {
-	// Without sticky pages every tracked page is write-protected, so the store faulted already.
-	if (!RegionManager::StickyEnabled()) {
-		return;
-	}
-	if (!GuestRange {vaddr, size}.Valid() || m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
-		// GPU-owned pages are protected, so the store itself faulted.
-		return;
-	}
-	m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
-	QueueBdaSync(vaddr, size);
 }
 
 bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {

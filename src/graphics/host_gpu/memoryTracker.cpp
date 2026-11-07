@@ -3,8 +3,6 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 
-#include <algorithm>
-
 namespace Libs::Graphics {
 
 static_assert(std::atomic<void*>::is_always_lock_free);
@@ -83,33 +81,9 @@ bool MemoryTracker::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {
-	Iterate<false>(vaddr, size, [this](RegionManager* manager, uint64_t offset, uint64_t bytes) {
-		bool new_sticky = false;
-		{
-			std::scoped_lock lock(manager->lock);
-			manager->ChangeState<DirtySource::Cpu, true>(offset, bytes);
-			new_sticky = manager->TakeNewSticky();
-		}
-		if (new_sticky) {
-			AddStickyRegion(manager);
-		}
-	});
-}
-
-void MemoryTracker::AddStickyRegion(RegionManager* manager) {
-	std::scoped_lock lock(m_sticky_mutex);
-	if (std::find(m_sticky_regions.begin(), m_sticky_regions.end(), manager) ==
-	    m_sticky_regions.end()) {
-		m_sticky_regions.push_back(manager);
-	}
-}
-
-void MemoryTracker::RefreshSticky(const std::function<void(uint64_t, uint64_t)>& on_dirty) {
-	const auto epoch = RegionManager::StickyEpoch().fetch_add(1, std::memory_order_relaxed) + 1;
-	std::scoped_lock lock(m_sticky_mutex);
-	std::erase_if(m_sticky_regions, [epoch, &on_dirty](RegionManager* manager) {
-		std::scoped_lock region_lock(manager->lock);
-		return !manager->RefreshSticky(epoch, on_dirty);
+	Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		std::scoped_lock lock(manager->lock);
+		manager->ChangeState<DirtySource::Cpu, true>(offset, bytes);
 	});
 }
 

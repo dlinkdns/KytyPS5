@@ -33,13 +33,16 @@ public:
 		const auto thread = CurrentThread();
 		while (m_lock.test_and_set(std::memory_order_acquire)) {
 			EXIT_NOT_IMPLEMENTED(m_owner.load(std::memory_order_relaxed) == thread);
+			// Wait on reads, so the holder's cache line is not written until the lock is free.
+			while (m_lock.test(std::memory_order_relaxed)) {
 #if defined(__x86_64__) || defined(_M_X64)
-			_mm_pause();
+				_mm_pause();
 #elif defined(_M_ARM64)
-			__yield();
+				__yield();
 #elif defined(__aarch64__)
-			asm volatile("yield");
+				asm volatile("yield");
 #endif
+			}
 		}
 		m_owner.store(thread, std::memory_order_relaxed);
 	}
@@ -77,8 +80,6 @@ public:
 	RegionManager(PageManager& page_manager, uint64_t cpu_addr)
 	    : m_page_manager(page_manager), m_cpu_addr(cpu_addr) {
 		m_cpu_dirty.Fill();
-		m_writable.Fill();
-		m_readable.Fill();
 	}
 
 	KYTY_CLASS_NO_COPY(RegionManager);
@@ -96,26 +97,18 @@ public:
 			if (m_gpu_dirty.FirstRangeFrom(start).first < end) {
 				EXIT("CPU dirty state conflicts with GPU dirty state\n");
 			}
-			NoteCpuWrite(start, end);
 		}
-		if constexpr (source == DirtySource::Gpu && enable) {
-			// GPU-owned pages must fault on CPU writes again.
-			if (m_sticky.FirstRangeFrom(start).first < end) {
-				m_sticky.UnsetRange(start, end);
-				m_cpu_dirty.UnsetRange(start, end);
-				UpdateProtection<true, false>();
-			}
-		}
-		auto& bits = GetBits<source>();
+		auto&      bits = GetBits<source>();
+		RegionBits changed(enable ? ~bits : bits, start, end);
 		if constexpr (enable) {
 			bits.SetRange(start, end);
 		} else {
 			bits.UnsetRange(start, end);
 		}
 		if constexpr (source == DirtySource::Cpu) {
-			UpdateProtection<!enable, false>();
+			UpdateProtection<!enable, false>(changed);
 		} else {
-			UpdateProtection<enable, true>();
+			UpdateProtection<enable, true>(changed);
 		}
 	}
 
@@ -130,9 +123,9 @@ public:
 		if constexpr (clear) {
 			bits.UnsetRange(start, end);
 			if constexpr (source == DirtySource::Cpu) {
-				UpdateProtection<true, false>();
+				UpdateProtection<true, false>(mask);
 			} else {
-				UpdateProtection<false, true>();
+				UpdateProtection<false, true>(mask);
 			}
 		}
 		for (const auto [first, last]: mask) {
@@ -140,96 +133,15 @@ public:
 		}
 	}
 
-	// Pages the guest CPU rewrites again and again stay unprotected ("sticky"): instead of a
-	// write fault and two protection changes per write, they are marked dirty again by every
-	// RefreshSticky (once per guest command buffer) and uploaded when next used. Called with the
-	// lock held; returns whether the region still has sticky pages.
-	// on_dirty(address, size) receives each sticky range now marked CPU-modified, so callers can
-	// queue the work an ordinary write fault would.
-	template <typename Func>
-	bool RefreshSticky(uint32_t epoch, Func&& on_dirty) {
-		if (m_sticky.None()) {
-			return false;
-		}
-		// Writes since the last refresh did not fault: mark the pages modified first.
-		auto dirty = m_sticky;
-		dirty &= ~m_gpu_dirty;
-		m_cpu_dirty |= dirty;
-		for (const auto [first, last]: dirty) {
-			on_dirty(m_cpu_addr + first * TRACKER_PAGE_SIZE, (last - first) * TRACKER_PAGE_SIZE);
-		}
-		if (epoch - m_sticky_epoch >= StickyLifetime) {
-			// Track the pages again once uploaded; still-hot ones turn sticky after two writes.
-			m_sticky.Clear();
-			return false;
-		}
-		return true;
-	}
-
-	[[nodiscard]] bool TakeNewSticky() noexcept { return std::exchange(m_has_new_sticky, false); }
-
-	static bool StickyEnabled() {
-		// Off by default (KYTY_STICKY_PAGES=1 enables): keeping sticky pages current for BDA
-		// readers re-uploads them after every guest command buffer, which cost Tekken 8 more
-		// GPU-thread time (~6 us per draw) than the write faults it saves.
-		static const bool enabled = [] {
-			const char* value = std::getenv("KYTY_STICKY_PAGES");
-			return value != nullptr && value[0] == '1';
-		}();
-		return enabled;
-	}
-
-	static std::atomic<uint32_t>& StickyEpoch() {
-		static std::atomic<uint32_t> epoch {0};
-		return epoch;
-	}
-
 	TrackingSpinLock lock;
 
 private:
-	static constexpr uint32_t StickyFaultWindow = 64;
-	static constexpr uint32_t StickyLifetime    = 4096;
-	static constexpr size_t   StickyMaxPages    = 16;
-
-	// A guest CPU write of a few clean pages: a page written twice within the window turns
-	// sticky.
-	void NoteCpuWrite(size_t start, size_t end) {
-		if (!StickyEnabled() || end - start > StickyMaxPages) {
-			return;
-		}
-		const auto epoch = StickyEpoch().load(std::memory_order_relaxed);
-		if (epoch - m_faulted_epoch >= StickyFaultWindow) {
-			m_faulted.Clear();
-			m_faulted_epoch = epoch;
-		}
-		for (size_t page = start; page < end; page++) {
-			if (m_cpu_dirty.Get(page) || m_sticky.Get(page)) {
-				continue;
-			}
-			if (!m_faulted.Get(page)) {
-				m_faulted.Set(page);
-				continue;
-			}
-			if (m_sticky.None()) {
-				m_sticky_epoch = epoch;
-			}
-			m_sticky.Set(page);
-			m_has_new_sticky = true;
-		}
-	}
-
+	// CPU-dirty pages are not write-watched; GPU-dirty pages are read-watched.
 	template <bool track, bool is_read>
-	void UpdateProtection() {
-		auto writable = m_cpu_dirty;
-		writable |= m_sticky;
-		const auto protection = is_read ? ~m_gpu_dirty : writable;
-		auto&      previous   = is_read ? m_readable : m_writable;
-		auto       mask       = protection ^ previous;
-		if (mask.None()) {
-			return;
+	void UpdateProtection(RegionBits& changed) {
+		if (!changed.None()) {
+			m_page_manager.UpdatePageWatchersForRegion<track, is_read>(m_cpu_addr, changed);
 		}
-		previous = protection;
-		m_page_manager.UpdatePageWatchersForRegion<track, is_read>(m_cpu_addr, mask);
 	}
 
 	template <DirtySource source>
@@ -259,13 +171,6 @@ private:
 	uint64_t     m_cpu_addr = 0;
 	RegionBits   m_cpu_dirty;
 	RegionBits   m_gpu_dirty;
-	RegionBits   m_writable;
-	RegionBits   m_readable;
-	RegionBits   m_faulted;
-	RegionBits   m_sticky;
-	uint32_t     m_faulted_epoch  = 0;
-	uint32_t     m_sticky_epoch   = 0;
-	bool         m_has_new_sticky = false;
 };
 
 } // namespace Libs::Graphics
